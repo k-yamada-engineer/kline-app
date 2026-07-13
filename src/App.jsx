@@ -136,6 +136,41 @@ const INITIAL_RECORDS = (() => {
   return [...SEED_RECORDS, ...legacy];
 })();
 
+/* ---------- 同期（Supabase / PostgREST） ----------
+   カンタ側でSupabaseプロジェクト作成後、下記2行を埋めて再デプロイすると
+   全端末の日報が自動同期される。空の間は完全オフライン動作（現状どおり）。
+   anon keyは公開前提のキー（テーブル権限はRLSで制限）。 */
+const SYNC_URL = "";     // 例: "https://xxxx.supabase.co"
+const SYNC_ANON_KEY = ""; // Supabase anon public key
+const SYNC_TABLE = "kline_records";
+const syncEnabled = () => Boolean(SYNC_URL && SYNC_ANON_KEY);
+
+const syncHeaders = () => ({
+  "Content-Type": "application/json",
+  apikey: SYNC_ANON_KEY,
+  Authorization: `Bearer ${SYNC_ANON_KEY}`,
+});
+/* 送信: 追加・更新・削除(tombstone)をまとめてupsert */
+async function syncPush(rows) {
+  if (!syncEnabled() || rows.length === 0) return true;
+  const res = await fetch(`${SYNC_URL}/rest/v1/${SYNC_TABLE}?on_conflict=id`, {
+    method: "POST",
+    headers: { ...syncHeaders(), Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify(rows),
+  });
+  return res.ok;
+}
+/* 受信: since以降に他端末で変わった行を取得 */
+async function syncPull(since) {
+  if (!syncEnabled()) return null;
+  const res = await fetch(
+    `${SYNC_URL}/rest/v1/${SYNC_TABLE}?updated_at=gt.${since}&select=id,payload,updated_at,deleted&order=updated_at.asc&limit=2000`,
+    { headers: syncHeaders() }
+  );
+  if (!res.ok) return null;
+  return res.json();
+}
+
 /* ---------- 写真圧縮 ---------- */
 const compressImage = (file) => new Promise((resolve) => {
   const img = new Image();
@@ -164,6 +199,13 @@ export default function App() {
   const [mode, setMode] = usePersist(K.mode, null); // null | {type:"admin"} | {type:"worker", name}
   const [pin, setPin] = usePersist(K.pin, "1234");
 
+  /* ---- 同期状態 ---- */
+  const [pendingIds, setPendingIds] = usePersist("kline4:pendingSync", []);
+  const [tombstones, setTombstones] = usePersist("kline4:tombstones", {});
+  const [lastSync, setLastSync] = usePersist("kline4:lastSync", 0);
+  const [syncState, setSyncState] = useState(syncEnabled() ? "idle" : "off");
+  const [lastSyncAt, setLastSyncAt] = useState(null);
+
   const [tab, setTab] = useState("home");
   const [month, setMonth] = useState(thisMonth());
   const [formOpen, setFormOpen] = useState(false);
@@ -181,7 +223,58 @@ export default function App() {
 
   const isWorker = mode?.type === "worker";
 
+  /* ---- 同期本体 ---- */
+  const doSync = async () => {
+    if (!syncEnabled()) return;
+    setSyncState("syncing");
+    try {
+      const recMap = new Map(records.map((r) => [r.id, r]));
+      const rows = [
+        ...pendingIds.filter((id) => recMap.has(id)).map((id) => {
+          const r = recMap.get(id);
+          return { id, payload: r, updated_at: r.updatedAt || r.createdAt || Date.now(), deleted: false };
+        }),
+        ...Object.entries(tombstones).map(([id, ts]) => ({ id, payload: null, updated_at: ts, deleted: true })),
+      ];
+      const pushed = await syncPush(rows);
+      if (pushed) { setPendingIds([]); setTombstones({}); }
+      const remote = await syncPull(lastSync);
+      if (remote) {
+        if (remote.length > 0) {
+          setRecords((prev) => {
+            const map = new Map(prev.map((r) => [r.id, r]));
+            for (const row of remote) {
+              if (row.deleted) { map.delete(row.id); continue; }
+              const loc = map.get(row.id);
+              const locTs = loc ? (loc.updatedAt || loc.createdAt || 0) : -1;
+              if (Number(row.updated_at) > locTs && row.payload) map.set(row.id, row.payload);
+            }
+            return [...map.values()];
+          });
+          setLastSync(Math.max(Number(lastSync) || 0, ...remote.map((r) => Number(r.updated_at) || 0)));
+        }
+        setSyncState(pushed ? "idle" : "error");
+        setLastSyncAt(Date.now());
+      } else {
+        setSyncState("error");
+      }
+    } catch {
+      setSyncState("error");
+    }
+  };
+  const syncRef = useRef(null);
+  syncRef.current = doSync;
+  useEffect(() => {
+    if (!syncEnabled()) return;
+    syncRef.current();
+    const t = setInterval(() => syncRef.current(), 60000);
+    const onVis = () => { if (!document.hidden) syncRef.current(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
+
   const saveRecord = (rec) => {
+    rec = { ...rec, updatedAt: Date.now() };
     setRecords((prev) => {
       const i = prev.findIndex((r) => r.id === rec.id);
       if (i >= 0) { const cp = [...prev]; cp[i] = rec; return cp; }
@@ -196,6 +289,10 @@ export default function App() {
     setHighlightId(rec.id);
     showToast("保存しました ✓");
     setTimeout(() => setHighlightId(null), 2600);
+    if (syncEnabled()) {
+      setPendingIds((p) => [...new Set([...p, rec.id])]);
+      setTimeout(() => syncRef.current(), 100);
+    }
   };
   const deleteRecord = (id) => {
     if (!window.confirm("この記録を削除しますか？")) return;
@@ -203,6 +300,11 @@ export default function App() {
     setFormOpen(false);
     setEditRec(null);
     showToast("削除しました");
+    if (syncEnabled()) {
+      setPendingIds((p) => p.filter((x) => x !== id));
+      setTombstones((t) => ({ ...t, [id]: Date.now() }));
+      setTimeout(() => syncRef.current(), 100);
+    }
   };
   const openEdit = (r) => { setEditRec(r); setFormOpen(true); };
   const openNew = () => { setEditRec(null); setFormOpen(true); };
@@ -229,7 +331,7 @@ export default function App() {
     return (
       <div className="kl-root">
         <div className="app-ui">
-          <WorkerView name={mode.name} records={records} onAdd={openNew} onEdit={openEdit} onAdmin={tryAdmin} highlightId={highlightId} />
+          <WorkerView name={mode.name} records={records} onAdd={openNew} onEdit={openEdit} onAdmin={tryAdmin} highlightId={highlightId} syncState={syncState} onSyncNow={() => syncRef.current()} />
           {formOpen && (
             <RecordForm
               record={editRec} records={records}
@@ -267,6 +369,8 @@ export default function App() {
               vehicles={vehicles} setVehicles={setVehicles}
               records={records} setRecords={setRecords}
               pin={pin} setPin={setPin} setMode={setMode}
+              syncState={syncState} lastSyncAt={lastSyncAt} pendingCount={pendingIds.length + Object.keys(tombstones).length}
+              onSyncNow={() => syncRef.current()}
               showToast={showToast}
             />
           )}
@@ -340,7 +444,7 @@ function RoleSelect({ employees, onWorker, onAdmin }) {
 /* ============================================================
    従業員モード：日報追加＋自分の今日の記録のみ
    ============================================================ */
-function WorkerView({ name, records, onAdd, onEdit, onAdmin, highlightId }) {
+function WorkerView({ name, records, onAdd, onEdit, onAdmin, highlightId, syncState, onSyncNow }) {
   const today = todayISO();
   const mine = records.filter((r) => r.driver === name && r.date === today);
   return (
@@ -368,9 +472,15 @@ function WorkerView({ name, records, onAdd, onEdit, onAdmin, highlightId }) {
         )}
       </section>
 
-      <p className="kl-note" style={{ marginTop: 30 }}>
-        ※記録はこの端末に保存されます。事務所への自動共有（同期）は現在準備中です。当面は月末に「設定→バックアップ」ファイルを事務所へ送ってください（管理者に切替が必要）。
-      </p>
+      {syncState === "off" ? (
+        <p className="kl-note" style={{ marginTop: 30 }}>
+          ※記録はこの端末に保存されます。事務所への自動共有（同期）は現在準備中です。当面は月末に「設定→バックアップ」ファイルを事務所へ送ってください（管理者に切替が必要）。
+        </p>
+      ) : (
+        <p className="kl-note" style={{ marginTop: 30 }} onClick={onSyncNow} role="button">
+          {syncState === "syncing" ? "🔄 事務所と同期中…" : syncState === "error" ? "⚠️ 同期エラー（電波の良い場所でタップして再同期）" : "✅ 記録は自動で事務所に共有されます（タップで今すぐ同期）"}
+        </p>
+      )}
       <button className="kl-role-switch" onClick={onAdmin}>管理者モードに切替（PIN）</button>
     </div>
   );
@@ -920,7 +1030,7 @@ function InvoiceDoc({ company, client, ym, records, onClose }) {
 /* ============================================================
    設定
    ============================================================ */
-function SettingsView({ company, setCompany, clients, setClients, employees, setEmployees, vehicles, setVehicles, records, setRecords, pin, setPin, setMode, showToast }) {
+function SettingsView({ company, setCompany, clients, setClients, employees, setEmployees, vehicles, setVehicles, records, setRecords, pin, setPin, setMode, syncState, lastSyncAt, pendingCount, onSyncNow, showToast }) {
   const setC = (k) => (e) => setCompany({ ...company, [k]: e.target.value });
   const importRef = useRef(null);
 
@@ -1018,6 +1128,26 @@ function SettingsView({ company, setCompany, clients, setClients, employees, set
           }}>モード選択に戻す</button>
         </div>
         <p className="kl-note">従業員のスマホでの初期設定：このアプリのURLを開く → ホーム画面に追加 → 自分の名前を選ぶ。メールアドレスやログインは不要です。</p>
+      </SettingCard>
+
+      <SettingCard icon={<Upload size={17} />} title="端末間の同期">
+        {syncState === "off" ? (
+          <p className="kl-note" style={{ marginTop: 0 }}>
+            同期は未設定です。設定が完了すると、従業員のスマホで入れた日報が自動でこの端末にも届きます（ログイン不要のまま）。現在はこの端末内のみの保存です。
+          </p>
+        ) : (
+          <>
+            <div className="kl-datacount">
+              <div><b>{syncState === "syncing" ? "同期中" : syncState === "error" ? "エラー" : "正常"}</b><span>状態</span></div>
+              <div><b>{lastSyncAt ? new Date(lastSyncAt).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }) : "—"}</b><span>最終同期</span></div>
+              <div><b>{pendingCount}</b><span>未送信</span></div>
+            </div>
+            <div className="kl-databtns">
+              <button onClick={onSyncNow}><Upload size={16} /> 今すぐ同期</button>
+            </div>
+            <p className="kl-note">約60秒ごと・アプリを開いた時・保存した時に自動同期します。</p>
+          </>
+        )}
       </SettingCard>
 
       <SettingCard icon={<Truck size={17} />} title={`車両（${vehicles.length}台）`}>
