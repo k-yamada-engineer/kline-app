@@ -4,6 +4,7 @@ import {
   FileText, ChevronLeft, ChevronRight, Trash2, X, Camera, Building2,
   Receipt, Pencil, Download, Upload, Check, Users, Printer, JapaneseYen
 } from "lucide-react";
+import SEED_RECORDS from "./seed.json";
 
 /* ============================================================
    株式会社K-LINE 運搬記録・請求書アプリ v3
@@ -75,32 +76,62 @@ const calcAmount = (qty, price, unit) => {
 };
 
 /* ---------- 初期データ（実データからプリセット） ---------- */
-/* 公開ページのため機密情報は埋め込まない。
-   初期データ（取引先・従業員・車両・振込先）は
-   設定 → 読み込み からセットアップファイルを取り込む。 */
 const DEF_COMPANY = {
   name: "株式会社K-LINE",
-  rep: "",
-  zip: "",
-  address: "",
-  tel: "",
-  bankName: "",
-  bankBranch: "",
+  rep: "山田 久美",
+  zip: "569-0047",
+  address: "大阪府高槻市堤町4-9-7",
+  tel: "072-604-0514",
+  bankName: "GMOあおぞらネット銀行",
+  bankBranch: "法人営業部",
   bankType: "普通預金",
-  bankNumber: "",
-  bankHolder: "",
-  regNo: "",
+  bankNumber: "2584703",
+  bankHolder: "カ）ケーライン",
+  regNo: "", // 適格請求書発行事業者登録番号（申請中・取得後に設定で入力）
   taxRate: 10,
   invoiceNote: "お振込手数料は御社にてご負担をお願いいたします。",
 };
-const DEF_CLIENTS = [];
-const DEF_EMPLOYEES = [];
-const DEF_VEHICLES = [];
+const DEF_CLIENTS = [
+  { id: "c1", name: "株式会社オクノナマコン", short: "オクノ", closing: "20" },
+  { id: "c2", name: "株式会社 Ｍ．Ｓ", short: "M.S", closing: "末" },
+  { id: "c3", name: "株式会社千石", short: "千石", closing: "末" },
+  { id: "c4", name: "拓建材", short: "拓建材", closing: "末" },
+  { id: "c5", name: "阪本建材", short: "阪本建材", closing: "末" },
+  { id: "c6", name: "株式会社金本組", short: "金本組", closing: "末" },
+  { id: "c7", name: "株式会社岡田興業", short: "岡田興業", closing: "末" },
+  { id: "c8", name: "林建材", short: "林建材", closing: "末" },
+  { id: "c9", name: "植田興業株式会社", short: "植田興業", closing: "末" },
+  { id: "c10", name: "金子建設", short: "金子建設", closing: "末" },
+  { id: "c11", name: "タイセイ開発", short: "タイセイ開発", closing: "20" },
+  { id: "c12", name: "ドウゴ資材", short: "ドウゴ資材", closing: "20" },
+  { id: "c13", name: "ウメザワ建材興業", short: "ウメザワ", closing: "末" },
+];
+const DEF_EMPLOYEES = [
+  { id: "e1", name: "山田 久美", role: "代表取締役", note: "" },
+  { id: "e2", name: "山田 善正", role: "ドライバー", note: "" },
+  { id: "e3", name: "後藤 俊晴", role: "ドライバー", note: "" },
+  { id: "e4", name: "山口 敬治", role: "ドライバー", note: "" },
+  { id: "e5", name: "蔵城 裕太", role: "ドライバー", note: "" },
+];
+const DEF_VEHICLES = [
+  { id: "v1", number: "9003", name: "ダンプ 9003", note: "" },
+  { id: "v2", number: "9393", name: "ダンプ 9393", note: "" },
+  { id: "v3", number: "9300", name: "ダンプ 9300", note: "" },
+  { id: "v4", number: "930", name: "ダンプ 930", note: "" },
+  { id: "v5", number: "93", name: "ダンプ 93", note: "" },
+  { id: "v6", number: "585", name: "ダンプ 585", note: "" },
+];
 const DEF_UNITS = ["台", "㎏", "㎥", "日", "式"];
 const K = {
-  company: "kline3:company", clients: "kline3:clients", employees: "kline3:employees",
-  vehicles: "kline3:vehicles", units: "kline3:units", records: "kline3:records",
+  company: "kline4:company", clients: "kline4:clients", employees: "kline4:employees",
+  vehicles: "kline4:vehicles", units: "kline4:units", records: "kline4:records",
 };
+/* 初期レコード = 2026年6月請求分の実績213明細（seed.json）。
+   旧バージョン(kline3)でユーザーが入れた記録があれば引き継ぐ。 */
+const INITIAL_RECORDS = (() => {
+  const legacy = LS("kline3:records", []).filter((r) => r && !String(r.id).startsWith("seed"));
+  return [...SEED_RECORDS, ...legacy];
+})();
 
 /* ---------- 写真圧縮 ---------- */
 const compressImage = (file) => new Promise((resolve) => {
@@ -125,7 +156,7 @@ export default function App() {
   const [employees, setEmployees] = usePersist(K.employees, DEF_EMPLOYEES);
   const [vehicles, setVehicles] = usePersist(K.vehicles, DEF_VEHICLES);
   const [units, setUnits] = usePersist(K.units, DEF_UNITS);
-  const [records, setRecords] = usePersist(K.records, []);
+  const [records, setRecords] = usePersist(K.records, INITIAL_RECORDS);
 
   const [tab, setTab] = useState("home");
   const [month, setMonth] = useState(thisMonth());
@@ -238,8 +269,10 @@ function NavBtn({ icon, label, active, onClick }) {
 function HomeView({ records, onAdd, onEdit, goInvoice, goRecords }) {
   const today = todayISO();
   const ym = thisMonth();
+  const prevYm = shiftMonth(ym, -1);
   const todayRecs = records.filter((r) => r.date === today);
   const monthRecs = records.filter((r) => monthOf(r.date) === ym);
+  const prevRecs = records.filter((r) => monthOf(r.date) === prevYm);
   const sum = (rs) => rs.reduce((a, r) => a + (Number(r.amount) || 0), 0);
   const dai = (rs) => rs.filter((r) => r.unit === "台" && r.type !== "toll").reduce((a, r) => a + (Number(r.qty) || 0), 0);
   const recent = [...records].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 5);
@@ -263,6 +296,11 @@ function HomeView({ records, onAdd, onEdit, goInvoice, goRecords }) {
           <span>今月の売上（税抜）</span>
           <b>{yen(sum(monthRecs))}</b>
           <small>{monthRecs.length}件 / {num(dai(monthRecs))}台</small>
+        </div>
+        <div className="kl-stat kl-stat-wide" onClick={() => goRecords(prevYm)} role="button">
+          <span>先月（{fmtMonth(prevYm)}）の売上（税抜）</span>
+          <b>{yen(sum(prevRecs))}</b>
+          <small>{prevRecs.length}件 — タップで日報を見る</small>
         </div>
       </div>
 
@@ -983,6 +1021,7 @@ button{ font-family:inherit; }
 .kl-stat span{ font-size:11.5px; color:var(--muted); font-weight:700; }
 .kl-stat b{ display:block; font-size:21px; font-weight:800; margin-top:2px; font-variant-numeric:tabular-nums; letter-spacing:-.01em; }
 .kl-stat small{ font-size:11.5px; color:var(--ink2); }
+.kl-stat-wide{ grid-column:1 / -1; cursor:pointer; }
 
 .kl-bigadd{ width:100%; margin:14px 0 4px; min-height:56px; border:none; border-radius:14px;
   background:var(--accent); color:#fff; font-size:16.5px; font-weight:800; display:flex; align-items:center; justify-content:center; gap:8px;
