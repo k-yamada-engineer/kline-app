@@ -57,14 +57,16 @@ const lastDay = (ym) => {
   const [y, m] = ym.split("-").map(Number);
   return new Date(y, m, 0).getDate();
 };
-/* 締め期間: 末締め=当月1〜末 / 20日締め=前月21〜当月20 */
+/* 締め期間: 末締め=当月1〜末 / N日締め=前月N+1〜当月N（Nは1〜28の任意日） */
 const closingPeriod = (ym, closing) => {
-  if (closing === "20") {
+  const d = parseInt(closing, 10);
+  if (closing !== "末" && d >= 1 && d <= 28) {
     const prev = shiftMonth(ym, -1);
-    return { from: `${prev}-21`, to: `${ym}-20` };
+    return { from: `${prev}-${String(d + 1).padStart(2, "0")}`, to: `${ym}-${String(d).padStart(2, "0")}` };
   }
   return { from: `${ym}-01`, to: `${ym}-${String(lastDay(ym)).padStart(2, "0")}` };
 };
+const closingLabel = (closing) => (closing === "末" ? "末締" : `${parseInt(closing, 10)}日締`);
 
 /* ---------- formatting ---------- */
 const yen = (n) => "¥" + Math.round(Number(n) || 0).toLocaleString("ja-JP");
@@ -125,6 +127,7 @@ const DEF_UNITS = ["台", "㎏", "㎥", "日", "式"];
 const K = {
   company: "kline4:company", clients: "kline4:clients", employees: "kline4:employees",
   vehicles: "kline4:vehicles", units: "kline4:units", records: "kline4:records",
+  mode: "kline4:mode", pin: "kline4:pin",
 };
 /* 初期レコード = 2026年6月請求分の実績213明細（seed.json）。
    旧バージョン(kline3)でユーザーが入れた記録があれば引き継ぐ。 */
@@ -158,6 +161,9 @@ export default function App() {
   const [units, setUnits] = usePersist(K.units, DEF_UNITS);
   const [records, setRecords] = usePersist(K.records, INITIAL_RECORDS);
 
+  const [mode, setMode] = usePersist(K.mode, null); // null | {type:"admin"} | {type:"worker", name}
+  const [pin, setPin] = usePersist(K.pin, "1234");
+
   const [tab, setTab] = useState("home");
   const [month, setMonth] = useState(thisMonth());
   const [formOpen, setFormOpen] = useState(false);
@@ -173,6 +179,8 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(null), 2200);
   };
 
+  const isWorker = mode?.type === "worker";
+
   const saveRecord = (rec) => {
     setRecords((prev) => {
       const i = prev.findIndex((r) => r.id === rec.id);
@@ -181,8 +189,10 @@ export default function App() {
     });
     setFormOpen(false);
     setEditRec(null);
-    setMonth(monthOf(rec.date));
-    setTab("records");
+    if (!isWorker) {
+      setMonth(monthOf(rec.date));
+      setTab("records");
+    }
     setHighlightId(rec.id);
     showToast("保存しました ✓");
     setTimeout(() => setHighlightId(null), 2600);
@@ -196,6 +206,45 @@ export default function App() {
   };
   const openEdit = (r) => { setEditRec(r); setFormOpen(true); };
   const openNew = () => { setEditRec(null); setFormOpen(true); };
+
+  const tryAdmin = () => {
+    const input = window.prompt("管理者PINを入力してください");
+    if (input === null) return;
+    if (input === pin) setMode({ type: "admin" });
+    else window.alert("PINが違います");
+  };
+
+  /* ---- 初回：モード選択 ---- */
+  if (!mode) {
+    return (
+      <div className="kl-root">
+        <RoleSelect employees={employees} onWorker={(name) => setMode({ type: "worker", name })} onAdmin={tryAdmin} />
+        <GlobalStyle />
+      </div>
+    );
+  }
+
+  /* ---- 従業員モード：日報追加のみ ---- */
+  if (isWorker) {
+    return (
+      <div className="kl-root">
+        <div className="app-ui">
+          <WorkerView name={mode.name} records={records} onAdd={openNew} onEdit={openEdit} onAdmin={tryAdmin} highlightId={highlightId} />
+          {formOpen && (
+            <RecordForm
+              record={editRec} records={records}
+              clients={clients} vehicles={vehicles} employees={employees} units={units}
+              lockedDriver={mode.name}
+              onSave={saveRecord} onDelete={deleteRecord}
+              onClose={() => { setFormOpen(false); setEditRec(null); }}
+            />
+          )}
+          {toast && <div className="kl-toast">{toast}</div>}
+        </div>
+        <GlobalStyle />
+      </div>
+    );
+  }
 
   return (
     <div className="kl-root">
@@ -217,6 +266,7 @@ export default function App() {
               employees={employees} setEmployees={setEmployees}
               vehicles={vehicles} setVehicles={setVehicles}
               records={records} setRecords={setRecords}
+              pin={pin} setPin={setPin} setMode={setMode}
               showToast={showToast}
             />
           )}
@@ -260,6 +310,69 @@ function NavBtn({ icon, label, active, onClick }) {
     <button className={"kl-navbtn" + (active ? " is-active" : "")} onClick={onClick}>
       {icon}<span>{label}</span>
     </button>
+  );
+}
+
+/* ============================================================
+   モード選択（初回起動時）
+   ============================================================ */
+function RoleSelect({ employees, onWorker, onAdmin }) {
+  return (
+    <div className="kl-role">
+      <div className="kl-role-box">
+        <div className="kl-brand" style={{ justifyContent: "center" }}><Truck size={20} /> 株式会社K-LINE</div>
+        <h1>運搬記録アプリ</h1>
+        <p>この端末を使う人を選んでください。<br />（次回からは自動でこの画面をスキップします）</p>
+        <div className="kl-role-list">
+          {employees.filter((e) => e.role !== "代表取締役").map((e) => (
+            <button key={e.id} className="kl-role-btn" onClick={() => onWorker(e.name)}>
+              <Users size={18} /> {e.name} <span>{e.role}</span>
+            </button>
+          ))}
+        </div>
+        <button className="kl-role-admin" onClick={onAdmin}>管理者として使う（PIN入力）</button>
+        <p className="kl-note" style={{ textAlign: "center" }}>初期PIN：1234（設定画面で必ず変更してください）</p>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   従業員モード：日報追加＋自分の今日の記録のみ
+   ============================================================ */
+function WorkerView({ name, records, onAdd, onEdit, onAdmin, highlightId }) {
+  const today = todayISO();
+  const mine = records.filter((r) => r.driver === name && r.date === today);
+  return (
+    <div className="kl-page" style={{ padding: "14px 16px 40px" }}>
+      <header className="kl-header">
+        <div>
+          <div className="kl-brand"><Truck size={18} /> 株式会社K-LINE</div>
+          <h1>{fmtDay(today)} の日報</h1>
+        </div>
+        <span className="kl-worker-badge">{name.split(" ")[0]}</span>
+      </header>
+
+      <button className="kl-bigadd" onClick={onAdd}>
+        <Plus size={22} strokeWidth={2.6} /> 運搬を記録する
+      </button>
+
+      <section className="kl-section">
+        <div className="kl-sechead"><h2>今日のあなたの記録（{mine.length}件）</h2></div>
+        {mine.length === 0 ? (
+          <div className="kl-empty">まだ記録がありません。<br />1運行ごと、その場で記録してください。</div>
+        ) : (
+          <div className="kl-cards">
+            {mine.map((r) => <RecordCard key={r.id} r={r} onClick={() => onEdit(r)} highlight={r.id === highlightId} />)}
+          </div>
+        )}
+      </section>
+
+      <p className="kl-note" style={{ marginTop: 30 }}>
+        ※記録はこの端末に保存されます。事務所への自動共有（同期）は現在準備中です。当面は月末に「設定→バックアップ」ファイルを事務所へ送ってください（管理者に切替が必要）。
+      </p>
+      <button className="kl-role-switch" onClick={onAdmin}>管理者モードに切替（PIN）</button>
+    </div>
   );
 }
 
@@ -434,7 +547,7 @@ function MonthNav({ month, setMonth, title }) {
 /* ============================================================
    記録フォーム
    ============================================================ */
-function RecordForm({ record, records, clients, vehicles, employees, units, onSave, onDelete, onClose }) {
+function RecordForm({ record, records, clients, vehicles, employees, units, onSave, onDelete, onClose, lockedDriver }) {
   const isEdit = !!record;
   const [type, setType] = useState(record?.type || "normal");
   const [date, setDate] = useState(record?.date || todayISO());
@@ -445,7 +558,7 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
   const [unitPrice, setUnitPrice] = useState(record ? String(record.unitPrice ?? "") : "");
   const [tollAmount, setTollAmount] = useState(record?.type === "toll" ? String(record.amount ?? "") : "");
   const [vehicle, setVehicle] = useState(record?.vehicle || "");
-  const [driver, setDriver] = useState(record?.driver || "");
+  const [driver, setDriver] = useState(record?.driver || lockedDriver || "");
   const [memo, setMemo] = useState(record?.memo || "");
   const [photo, setPhoto] = useState(record?.photo || null);
   const fileRef = useRef(null);
@@ -469,6 +582,13 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
         .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
       if (last) { setUnitPrice(String(last.unitPrice || "")); setUnit(last.unit || "台"); }
     }
+  };
+
+  /* 取引先選択時：取引先マスタの既定単価・単位をプリセット */
+  const applyClient = (c) => {
+    setClient(c.name);
+    if (c.defaultUnit) setUnit(c.defaultUnit);
+    if (!unitPrice && c.defaultUnitPrice) setUnitPrice(String(c.defaultUnitPrice));
   };
 
   const amount = type === "toll"
@@ -524,7 +644,7 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
           ) : (
             <div className="kl-chips">
               {clients.map((c) => (
-                <button key={c.id} className={"kl-chip" + (client === c.name ? " is-on" : "")} onClick={() => setClient(c.name)}>
+                <button key={c.id} className={"kl-chip" + (client === c.name ? " is-on" : "")} onClick={() => applyClient(c)}>
                   {c.short || c.name}
                 </button>
               ))}
@@ -590,12 +710,16 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
             </div>
           </Field>
           <Field label="運転手">
-            <div className="kl-chips">
-              {employees.map((p) => (
-                <button key={p.id} className={"kl-chip" + (driver === p.name ? " is-on" : "")}
-                  onClick={() => setDriver(driver === p.name ? "" : p.name)}>{p.name.split(" ")[0]}</button>
-              ))}
-            </div>
+            {lockedDriver ? (
+              <div className="kl-chips"><span className="kl-chip is-on">{lockedDriver}</span></div>
+            ) : (
+              <div className="kl-chips">
+                {employees.map((p) => (
+                  <button key={p.id} className={"kl-chip" + (driver === p.name ? " is-on" : "")}
+                    onClick={() => setDriver(driver === p.name ? "" : p.name)}>{p.name.split(" ")[0]}</button>
+                ))}
+              </div>
+            )}
           </Field>
         </div>
 
@@ -674,7 +798,7 @@ function InvoiceListView({ records, clients, month, setMonth, onPreview }) {
           <div className="kl-cards">
             {inactive.map(({ c }) => (
               <div key={c.id} className="kl-invcard is-dim">
-                <div className="kl-invcard-l"><b>{c.name}</b><span>{c.closing === "20" ? "20日締め" : "末締め"}・記録なし</span></div>
+                <div className="kl-invcard-l"><b>{c.name}</b><span>{closingLabel(c.closing)}・記録なし</span></div>
               </div>
             ))}
           </div>
@@ -700,7 +824,7 @@ function InvoiceDoc({ company, client, ym, records, onClose }) {
   const tollSum = toll.reduce((a, r) => a + (Number(r.amount) || 0), 0);
   const total = sub + tax + tollSum;
   const [y, m] = ym.split("-").map(Number);
-  const closingLabel = `${wareki(y)}${m}月${client.closing === "20" ? "20日" : "末"}締分`;
+  const closingText = `${wareki(y)}${m}月${client.closing === "末" ? "末" : `${parseInt(client.closing, 10)}日`}締分`;
   const invNo = `${ym.replace("-", "")}-${String(client.id).replace(/\D/g, "").padStart(2, "0")}`;
 
   return (
@@ -712,7 +836,7 @@ function InvoiceDoc({ company, client, ym, records, onClose }) {
       </div>
 
       <div className="kl-doc" id="invoice-doc">
-        <div className="kl-doc-closing">{closingLabel}</div>
+        <div className="kl-doc-closing">{closingText}</div>
         <h1 className="kl-doc-title">請　求　書</h1>
 
         <div className="kl-doc-head">
@@ -796,7 +920,7 @@ function InvoiceDoc({ company, client, ym, records, onClose }) {
 /* ============================================================
    設定
    ============================================================ */
-function SettingsView({ company, setCompany, clients, setClients, employees, setEmployees, vehicles, setVehicles, records, setRecords, showToast }) {
+function SettingsView({ company, setCompany, clients, setClients, employees, setEmployees, vehicles, setVehicles, records, setRecords, pin, setPin, setMode, showToast }) {
   const setC = (k) => (e) => setCompany({ ...company, [k]: e.target.value });
   const importRef = useRef(null);
 
@@ -873,10 +997,27 @@ function SettingsView({ company, setCompany, clients, setClients, employees, set
       </SettingCard>
 
       <SettingCard icon={<Users size={17} />} title={`従業員（${employees.length}名）`}>
-        <PersonList
-          items={employees} setItems={setEmployees}
-          fields={[{ key: "name", ph: "氏名" }, { key: "role", ph: "役割（ドライバー等）" }]}
-        />
+        <EmployeeList employees={employees} setEmployees={setEmployees} />
+      </SettingCard>
+
+      <SettingCard icon={<Check size={17} />} title="権限・PIN（この端末のモード）">
+        <p className="kl-note" style={{ marginTop: 0 }}>
+          従業員モードの端末では「日報の追加」と「自分の今日の記録」だけが表示されます。請求書・設定・売上は管理者PINが必要です。
+        </p>
+        <div className="kl-databtns">
+          <button onClick={() => {
+            const cur = window.prompt("現在のPINを入力");
+            if (cur === null) return;
+            if (cur !== pin) { window.alert("PINが違います"); return; }
+            const next = window.prompt("新しいPIN（4桁以上の数字）");
+            if (next && /^\d{4,}$/.test(next)) { setPin(next); showToast("PINを変更しました ✓"); }
+            else if (next !== null) window.alert("4桁以上の数字で入力してください");
+          }}>PINを変更</button>
+          <button onClick={() => {
+            if (window.confirm("この端末をモード選択画面に戻しますか？\n（従業員に渡す前に実行してください）")) setMode(null);
+          }}>モード選択に戻す</button>
+        </div>
+        <p className="kl-note">従業員のスマホでの初期設定：このアプリのURLを開く → ホーム画面に追加 → 自分の名前を選ぶ。メールアドレスやログインは不要です。</p>
       </SettingCard>
 
       <SettingCard icon={<Truck size={17} />} title={`車両（${vehicles.length}台）`}>
@@ -913,39 +1054,153 @@ function SettingCard({ icon, title, children }) {
   );
 }
 
-/* 取引先リスト（締め日つき） */
+/* 締め日ピッカー（20日／末／その他の任意日） */
+function ClosingPicker({ value, onChange }) {
+  const isCustom = value !== "20" && value !== "末";
+  return (
+    <div className="kl-closing">
+      <button className={value === "20" ? "is-on" : ""} onClick={() => onChange("20")}>20日締</button>
+      <button className={value === "末" ? "is-on" : ""} onClick={() => onChange("末")}>末締</button>
+      <button className={isCustom ? "is-on" : ""} onClick={() => onChange(isCustom ? value : "10")}>その他</button>
+      {isCustom && (
+        <span className="kl-closing-custom">
+          <input type="text" inputMode="numeric" value={parseInt(value, 10) || ""}
+            onChange={(e) => { const v = e.target.value.replace(/\D/g, ""); onChange(v ? String(Math.min(28, Number(v))) : "10"); }} />
+          日締
+        </span>
+      )}
+    </div>
+  );
+}
+
+/* 取引先リスト（詳細編集つき） */
 function ClientList({ clients, setClients }) {
   const [name, setName] = useState("");
-  const [closing, setClosing] = useState("末");
+  const [openId, setOpenId] = useState(null);
   const add = () => {
     const n = name.trim();
     if (!n) return;
-    setClients([...clients, { id: uid(), name: n, short: n.replace(/株式会社|有限会社|\(株\)|㈱|\(有\)/g, "").trim() || n, closing }]);
+    const c = {
+      id: uid(), name: n,
+      short: n.replace(/株式会社|有限会社|\(株\)|㈱|\(有\)/g, "").trim() || n,
+      closing: "末", regNo: "", defaultUnit: "", defaultUnitPrice: "", note: "",
+    };
+    setClients([...clients, c]);
     setName("");
+    setOpenId(c.id);
   };
-  const setClosingOf = (id, c) => setClients(clients.map((x) => (x.id === id ? { ...x, closing: c } : x)));
+  const patch = (id, k, v) => setClients(clients.map((x) => (x.id === id ? { ...x, [k]: v } : x)));
   const del = (id) => { if (window.confirm("この取引先を削除しますか？（過去の記録は残ります）")) setClients(clients.filter((x) => x.id !== id)); };
 
   return (
     <div>
       {clients.map((c) => (
-        <div key={c.id} className="kl-listrow">
-          <div className="kl-listrow-main">
-            <b>{c.name}</b>
+        <div key={c.id} className="kl-cliblock">
+          <div className="kl-listrow" onClick={() => setOpenId(openId === c.id ? null : c.id)} role="button">
+            <div className="kl-listrow-main">
+              <b>{c.name}</b>
+              <span>
+                {closingLabel(c.closing)}
+                {c.defaultUnitPrice ? `・既定単価 ${num(c.defaultUnitPrice)}円` : ""}
+                {c.regNo ? "・インボイス登録済" : ""}
+              </span>
+            </div>
+            <button className="kl-rowdel" aria-label="編集"><Pencil size={15} /></button>
           </div>
-          <div className="kl-closing">
-            <button className={c.closing === "20" ? "is-on" : ""} onClick={() => setClosingOf(c.id, "20")}>20日締</button>
-            <button className={c.closing === "末" ? "is-on" : ""} onClick={() => setClosingOf(c.id, "末")}>末締</button>
-          </div>
-          <button className="kl-rowdel" onClick={() => del(c.id)}><Trash2 size={15} /></button>
+          {openId === c.id && (
+            <div className="kl-cliedit">
+              <Field label="会社名（請求書の宛名）">
+                <input value={c.name} onChange={(e) => patch(c.id, "name", e.target.value)} />
+              </Field>
+              <Field label="略称（入力ボタンの表示）">
+                <input value={c.short || ""} onChange={(e) => patch(c.id, "short", e.target.value)} />
+              </Field>
+              <Field label="締め日">
+                <ClosingPicker value={c.closing} onChange={(v) => patch(c.id, "closing", v)} />
+              </Field>
+              <Field label="先方インボイス登録番号（任意）">
+                <input value={c.regNo || ""} onChange={(e) => patch(c.id, "regNo", e.target.value)} placeholder="T0000000000000" />
+              </Field>
+              <div className="kl-row2">
+                <Field label="既定単価（円・任意）">
+                  <input inputMode="numeric" value={c.defaultUnitPrice || ""}
+                    onChange={(e) => patch(c.id, "defaultUnitPrice", e.target.value.replace(/\D/g, ""))} placeholder="例）42000" />
+                </Field>
+                <Field label="既定単位（任意）">
+                  <div className="kl-chips">
+                    {DEF_UNITS.map((u) => (
+                      <button key={u} className={"kl-chip kl-chip-s" + ((c.defaultUnit || "") === u ? " is-on" : "")}
+                        onClick={() => patch(c.id, "defaultUnit", c.defaultUnit === u ? "" : u)}>{u}</button>
+                    ))}
+                  </div>
+                </Field>
+              </div>
+              <Field label="メモ（担当者・支払条件など）">
+                <input value={c.note || ""} onChange={(e) => patch(c.id, "note", e.target.value)} />
+              </Field>
+              <button className="kl-wipe" style={{ marginTop: 0 }} onClick={() => del(c.id)}><Trash2 size={14} /> この取引先を削除</button>
+            </div>
+          )}
         </div>
       ))}
       <div className="kl-addrow">
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="取引先名を追加" />
-        <div className="kl-closing">
-          <button className={closing === "20" ? "is-on" : ""} onClick={() => setClosing("20")}>20日</button>
-          <button className={closing === "末" ? "is-on" : ""} onClick={() => setClosing("末")}>末</button>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="取引先名を追加（追加後に詳細を編集）" />
+        <button className="kl-rowadd" onClick={add}><Plus size={17} /></button>
+      </div>
+    </div>
+  );
+}
+
+/* 従業員リスト（詳細編集つき） */
+function EmployeeList({ employees, setEmployees }) {
+  const [name, setName] = useState("");
+  const [openId, setOpenId] = useState(null);
+  const add = () => {
+    const n = name.trim();
+    if (!n) return;
+    const e = { id: uid(), name: n, role: "ドライバー", phone: "", wage: "", joined: "", licence: "", note: "" };
+    setEmployees([...employees, e]);
+    setName("");
+    setOpenId(e.id);
+  };
+  const patch = (id, k, v) => setEmployees(employees.map((x) => (x.id === id ? { ...x, [k]: v } : x)));
+  const del = (id) => { if (window.confirm("この従業員を削除しますか？")) setEmployees(employees.filter((x) => x.id !== id)); };
+
+  return (
+    <div>
+      {employees.map((p) => (
+        <div key={p.id} className="kl-cliblock">
+          <div className="kl-listrow" onClick={() => setOpenId(openId === p.id ? null : p.id)} role="button">
+            <div className="kl-listrow-main">
+              <b>{p.name}</b>
+              <span>{p.role}{p.phone ? `・${p.phone}` : ""}{p.wage ? `・${p.wage}` : ""}</span>
+            </div>
+            <button className="kl-rowdel" aria-label="編集"><Pencil size={15} /></button>
+          </div>
+          {openId === p.id && (
+            <div className="kl-cliedit">
+              <div className="kl-row2">
+                <Field label="氏名"><input value={p.name} onChange={(e) => patch(p.id, "name", e.target.value)} /></Field>
+                <Field label="役割"><input value={p.role || ""} onChange={(e) => patch(p.id, "role", e.target.value)} placeholder="ドライバー／事務 等" /></Field>
+              </div>
+              <div className="kl-row2">
+                <Field label="電話番号"><input inputMode="tel" value={p.phone || ""} onChange={(e) => patch(p.id, "phone", e.target.value)} /></Field>
+                <Field label="入社日"><input type="date" value={p.joined || ""} onChange={(e) => patch(p.id, "joined", e.target.value)} /></Field>
+              </div>
+              <div className="kl-row2">
+                <Field label="給与（日給/月給メモ）"><input value={p.wage || ""} onChange={(e) => patch(p.id, "wage", e.target.value)} placeholder="例）日給15,000円" /></Field>
+                <Field label="免許・資格"><input value={p.licence || ""} onChange={(e) => patch(p.id, "licence", e.target.value)} placeholder="例）大型一種" /></Field>
+              </div>
+              <Field label="メモ（社保・緊急連絡先など）">
+                <input value={p.note || ""} onChange={(e) => patch(p.id, "note", e.target.value)} />
+              </Field>
+              <button className="kl-wipe" style={{ marginTop: 0 }} onClick={() => del(p.id)}><Trash2 size={14} /> この従業員を削除</button>
+            </div>
+          )}
         </div>
+      ))}
+      <div className="kl-addrow">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="従業員名を追加（追加後に詳細を編集）" />
         <button className="kl-rowadd" onClick={add}><Plus size={17} /></button>
       </div>
     </div>
@@ -1149,6 +1404,29 @@ button{ font-family:inherit; }
 .kl-databtns{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 .kl-databtns button{ min-height:46px; border:1.5px solid var(--line); background:var(--bg); border-radius:11px; font-size:13.5px; font-weight:800; color:var(--ink); display:flex; align-items:center; justify-content:center; gap:6px; cursor:pointer; }
 .kl-wipe{ margin-top:12px; width:100%; min-height:42px; border:none; background:none; color:#C0392B; font-size:13px; font-weight:800; display:flex; align-items:center; justify-content:center; gap:5px; cursor:pointer; }
+
+/* role select / worker mode */
+.kl-role{ min-height:100dvh; display:grid; place-items:center; padding:20px; background:var(--bg); }
+.kl-role-box{ width:100%; max-width:420px; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:28px 22px; box-shadow:var(--shadow); text-align:center; }
+.kl-role-box h1{ font-size:21px; font-weight:800; margin:8px 0 6px; }
+.kl-role-box > p{ font-size:13px; color:var(--ink2); line-height:1.7; margin:0 0 18px; }
+.kl-role-list{ display:flex; flex-direction:column; gap:9px; margin-bottom:16px; }
+.kl-role-btn{ display:flex; align-items:center; gap:10px; min-height:54px; border:1.5px solid var(--line); background:var(--bg); border-radius:13px; font-size:16px; font-weight:800; color:var(--ink); padding:0 16px; cursor:pointer; }
+.kl-role-btn span{ margin-left:auto; font-size:11.5px; color:var(--muted); font-weight:700; }
+.kl-role-btn:active{ border-color:var(--accent); }
+.kl-role-admin{ width:100%; min-height:48px; border:none; border-radius:12px; background:var(--ink); color:#fff; font-size:14px; font-weight:800; cursor:pointer; margin-bottom:10px; }
+.kl-role-switch{ margin-top:14px; width:100%; min-height:44px; border:1.5px solid var(--line); background:none; border-radius:12px; color:var(--muted); font-size:12.5px; font-weight:700; cursor:pointer; }
+.kl-worker-badge{ background:var(--accent-soft); color:var(--accent); font-size:13px; font-weight:800; padding:7px 14px; border-radius:99px; }
+
+/* client / employee editor */
+.kl-cliblock{ border-bottom:1px solid var(--line); }
+.kl-cliblock:last-of-type{ border-bottom:none; }
+.kl-cliblock .kl-listrow{ border-bottom:none; cursor:pointer; }
+.kl-cliedit{ background:#FBFAF6; border:1px solid var(--line); border-radius:12px; padding:14px 14px 6px; margin:0 0 12px; }
+.kl-cliedit .kl-field{ margin-bottom:10px; }
+.kl-closing{ display:flex; gap:4px; flex:0 0 auto; align-items:center; flex-wrap:wrap; }
+.kl-closing-custom{ display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:800; color:var(--ink2); }
+.kl-closing-custom input{ width:52px; min-height:34px; border:1.5px solid var(--accent); border-radius:8px; text-align:center; font-size:15px; font-weight:800; outline:none; }
 
 /* toast */
 .kl-toast{ position:fixed; bottom:calc(92px + env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%);
