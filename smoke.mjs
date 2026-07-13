@@ -122,6 +122,65 @@ await new Promise(r => setTimeout(r, 300));
 console.log("--- 運転手別: 山田善正の見出しグループが出た?:", w.document.body.textContent.includes("山田 善正"));
 console.log("--- 運転手別: グループ見出しにアバターあり?:", w.document.querySelectorAll(".kl-sechead .kl-avatar").length > 0);
 
+// 複数現場まとめ登録のテスト（同じ日・車・運転手で3現場を1回のフォームで保存）
+const beforeCount = w.localStorage.getItem("kline4:records") ? JSON.parse(w.localStorage.getItem("kline4:records")).length : 0;
+w.document.querySelector(".kl-fab").dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 300));
+const clientChip2 = [...w.document.querySelectorAll(".kl-chip")].find(b => b.textContent.includes("千石"));
+clientChip2.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+console.log("--- 新規フォーム: 初期状態で「現場を追加」ボタンあり?:", [...w.document.querySelectorAll("button")].some(b => b.textContent.includes("現場を追加")));
+const addSiteBtn = () => [...w.document.querySelectorAll("button")].find(b => b.textContent.includes("現場を追加"));
+addSiteBtn().dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+addSiteBtn().dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+console.log("--- 3行(現場1/2/3)描画された?:", w.document.body.textContent.includes("現場 1") && w.document.body.textContent.includes("現場 2") && w.document.body.textContent.includes("現場 3"));
+
+const siteRows = [...w.document.querySelectorAll(".kl-siterow")];
+console.log("--- kl-siterow要素が3個ある?:", siteRows.length === 3);
+const fillRow = (rowEl, siteName, price) => {
+  const siteInput = rowEl.querySelector('input[type="text"]');
+  const setNative = Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, "value").set;
+  setNative.call(siteInput, siteName);
+  siteInput.dispatchEvent(new w.Event("input", { bubbles: true }));
+  const priceInput = [...rowEl.querySelectorAll('input[inputmode="numeric"]')][0];
+  setNative.call(priceInput, String(price));
+  priceInput.dispatchEvent(new w.Event("input", { bubbles: true }));
+};
+fillRow(siteRows[0], "現場A", "10000");
+fillRow(siteRows[1], "現場B", "20000");
+fillRow(siteRows[2], "現場C", "30000");
+await new Promise(r => setTimeout(r, 150));
+const tAmt = w.document.body.textContent;
+console.log("--- 合計金額表示(3件・¥60,000)?:", tAmt.includes("合計金額") && tAmt.includes("3件") && tAmt.includes("60,000"));
+
+const saveBtn2 = [...w.document.querySelectorAll("button")].find(b => b.textContent.includes("保存する"));
+console.log("--- 保存ボタンに3件表記あり?:", saveBtn2.textContent.includes("3件"));
+saveBtn2.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 400));
+console.log("--- トースト「保存しました（3件）」表示?:", w.document.body.textContent.includes("保存しました（3件）"));
+const afterRecords = JSON.parse(w.localStorage.getItem("kline4:records"));
+console.log("--- レコード件数が+3?:", afterRecords.length === beforeCount + 3);
+const savedSites = afterRecords.filter(r => ["現場A", "現場B", "現場C"].includes(r.site));
+console.log("--- 現場A/B/Cが別々のIDで3件保存?:", savedSites.length === 3 && new Set(savedSites.map(r => r.id)).size === 3);
+console.log("--- 3件とも金額が正しい(10000/20000/30000)?:", savedSites.every(r => [10000, 20000, 30000].includes(r.amount)));
+console.log("--- 3件とも取引先=千石?:", savedSites.every(r => r.client.includes("千石")));
+
+// 編集モードでは複数現場追加ボタンが出ないことを確認
+const editTarget = savedSites[0];
+const editCard = [...w.document.querySelectorAll(".kl-rec")].find(b => b.textContent.includes("現場A"));
+if (editCard) {
+  editCard.dispatchEvent(new w.Event("click", { bubbles: true }));
+  await new Promise(r => setTimeout(r, 300));
+  console.log("--- 編集モードでは「現場を追加」ボタンが非表示?:", ![...w.document.querySelectorAll("button")].some(b => b.textContent.includes("現場を追加")));
+  const closeBtn = w.document.querySelector(".kl-sheet-head .kl-iconbtn");
+  closeBtn.dispatchEvent(new w.Event("click", { bubbles: true }));
+  await new Promise(r => setTimeout(r, 200));
+} else {
+  console.log("--- 編集モード確認: 現場Aカードが見つからずスキップ");
+}
+
 // 従業員モードテスト: モードリセット→従業員選択
 w.localStorage.removeItem("kline4:mode");
 console.log("--- done");

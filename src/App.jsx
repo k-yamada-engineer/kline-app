@@ -293,24 +293,27 @@ export default function App() {
     return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVis); };
   }, []);
 
-  const saveRecord = (rec) => {
-    rec = { ...rec, updatedAt: Date.now() };
+  /* recsは1件のオブジェクトでも配列でもよい（複数現場まとめ登録に対応） */
+  const saveRecord = (recs) => {
+    const list = (Array.isArray(recs) ? recs : [recs]).map((r) => ({ ...r, updatedAt: Date.now() }));
+    if (list.length === 0) return;
     setRecords((prev) => {
-      const i = prev.findIndex((r) => r.id === rec.id);
-      if (i >= 0) { const cp = [...prev]; cp[i] = rec; return cp; }
-      return [...prev, rec];
+      const map = new Map(prev.map((r) => [r.id, r]));
+      list.forEach((r) => map.set(r.id, r));
+      return [...map.values()];
     });
     setFormOpen(false);
     setEditRec(null);
+    const last = list[list.length - 1];
     if (!isWorker) {
-      setMonth(monthOf(rec.date));
+      setMonth(monthOf(last.date));
       setTab("records");
     }
-    setHighlightId(rec.id);
-    showToast("保存しました ✓");
+    setHighlightId(last.id);
+    showToast(list.length > 1 ? `保存しました（${list.length}件）✓` : "保存しました ✓");
     setTimeout(() => setHighlightId(null), 2600);
     if (syncEnabled()) {
-      setPendingIds((p) => [...new Set([...p, rec.id])]);
+      setPendingIds((p) => [...new Set([...p, ...list.map((r) => r.id)])]);
       setTimeout(() => syncRef.current(), 100);
     }
   };
@@ -723,15 +726,19 @@ function MonthNav({ month, setMonth, title }) {
 /* ============================================================
    記録フォーム
    ============================================================ */
+/* 運搬1件分の行データ（現場名・数量・単位・単価） */
+const emptySiteRow = () => ({ id: uid(), site: "", qty: "1", unit: "台", unitPrice: "" });
+
 function RecordForm({ record, records, clients, vehicles, employees, units, onSave, onDelete, onClose, lockedDriver }) {
   const isEdit = !!record;
   const [type, setType] = useState(record?.type || "normal");
   const [date, setDate] = useState(record?.date || todayISO());
   const [client, setClient] = useState(record?.client || "");
-  const [site, setSite] = useState(record?.site || "");
-  const [qty, setQty] = useState(record ? String(record.qty ?? "") : "1");
-  const [unit, setUnit] = useState(record?.unit || "台");
-  const [unitPrice, setUnitPrice] = useState(record ? String(record.unitPrice ?? "") : "");
+  const [rows, setRows] = useState(() => (
+    record
+      ? [{ id: record.id, site: record.site || "", qty: String(record.qty ?? ""), unit: record.unit || "台", unitPrice: String(record.unitPrice ?? "") }]
+      : [emptySiteRow()]
+  ));
   const [tollAmount, setTollAmount] = useState(record?.type === "toll" ? String(record.amount ?? "") : "");
   const [vehicle, setVehicle] = useState(record?.vehicle || "");
   const [driver, setDriver] = useState(record?.driver || lockedDriver || "");
@@ -739,7 +746,11 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
   const [photo, setPhoto] = useState(record?.photo || null);
   const fileRef = useRef(null);
 
-  /* 取引先ごとの直近の現場・品名候補 */
+  const updateRow = (id, patch) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const addRow = () => setRows((rs) => [...rs, emptySiteRow()]);
+  const removeRow = (id) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.id !== id) : rs));
+
+  /* 取引先ごとの直近の現場・品名候補（全行で共有） */
   const siteSuggestions = useMemo(() => {
     const rs = records.filter((r) => (!client || r.client === client) && r.site);
     const seen = new Set(); const out = [];
@@ -749,29 +760,37 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
     return out.slice(0, 6);
   }, [records, client]);
 
-  /* 同じ取引先×現場の前回単価を自動プリセット */
-  const applySite = (s) => {
-    setSite(s);
-    if (!unitPrice) {
+  /* 同じ取引先×現場の前回単価を、その行にだけ自動プリセット */
+  const applyRowSite = (rowId, s) => {
+    const row = rows.find((r) => r.id === rowId);
+    let patch = { site: s };
+    if (row && !row.unitPrice) {
       const last = [...records]
         .filter((r) => r.client === client && r.site === s && r.type !== "toll")
         .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
-      if (last) { setUnitPrice(String(last.unitPrice || "")); setUnit(last.unit || "台"); }
+      if (last) patch = { ...patch, unitPrice: String(last.unitPrice || ""), unit: last.unit || "台" };
+    }
+    updateRow(rowId, patch);
+  };
+
+  /* 取引先選択時：取引先マスタの既定単価・単位を全行にプリセット */
+  const applyClient = (c) => {
+    setClient(c.name);
+    if (c.defaultUnit || c.defaultUnitPrice) {
+      setRows((rs) => rs.map((r) => ({
+        ...r,
+        unit: r.unit || c.defaultUnit || r.unit,
+        unitPrice: r.unitPrice || (c.defaultUnitPrice ? String(c.defaultUnitPrice) : r.unitPrice),
+      })));
     }
   };
 
-  /* 取引先選択時：取引先マスタの既定単価・単位をプリセット */
-  const applyClient = (c) => {
-    setClient(c.name);
-    if (c.defaultUnit) setUnit(c.defaultUnit);
-    if (!unitPrice && c.defaultUnitPrice) setUnitPrice(String(c.defaultUnitPrice));
-  };
-
+  const validRows = rows.filter((r) => Number(r.qty) > 0);
   const amount = type === "toll"
     ? Math.round(Number(tollAmount) || 0)
-    : calcAmount(qty, unitPrice, unit);
+    : rows.reduce((sum, r) => sum + calcAmount(r.qty, r.unitPrice, r.unit), 0);
 
-  const canSave = client && date && (type === "toll" ? amount > 0 : Number(qty) > 0);
+  const canSave = client && date && (type === "toll" ? amount > 0 : validRows.length > 0);
 
   const handlePhoto = async (e) => {
     const f = e.target.files?.[0];
@@ -782,16 +801,20 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
 
   const submit = () => {
     if (!canSave) return;
-    onSave({
-      id: record?.id || uid(),
-      type, date, client, site,
-      qty: type === "toll" ? 1 : Number(qty) || 0,
-      unit: type === "toll" ? "式" : unit,
-      unitPrice: type === "toll" ? amount : Number(unitPrice) || 0,
-      amount,
-      vehicle, driver, memo, photo,
-      createdAt: record?.createdAt || Date.now(),
-    });
+    const common = { date, client, vehicle, driver, memo, photo };
+    const toSave = type === "toll"
+      ? [{
+          id: record?.id || uid(), type: "toll", ...common,
+          qty: 1, unit: "式", unitPrice: amount, amount,
+          createdAt: record?.createdAt || Date.now(),
+        }]
+      : validRows.map((r) => ({
+          id: isEdit ? record.id : r.id, type: "normal", ...common,
+          site: r.site, qty: Number(r.qty) || 0, unit: r.unit, unitPrice: Number(r.unitPrice) || 0,
+          amount: calcAmount(r.qty, r.unitPrice, r.unit),
+          createdAt: record?.createdAt || Date.now(),
+        }));
+    onSave(toSave);
   };
 
   return (
@@ -828,40 +851,55 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
           )}
         </Field>
 
-        <Field label="現場名・品名">
-          <input type="text" value={site} onChange={(e) => setSite(e.target.value)} placeholder="例）中央砕石～6号 / 十三残土引き取り" />
-          {siteSuggestions.length > 0 && (
-            <div className="kl-chips kl-chips-sub">
-              {siteSuggestions.map((s) => (
-                <button key={s} className={"kl-chip kl-chip-s" + (site === s ? " is-on" : "")} onClick={() => applySite(s)}>{s}</button>
-              ))}
-            </div>
-          )}
-        </Field>
-
         {type === "normal" ? (
           <>
-            <div className="kl-row2">
-              <Field label="数量">
-                <div className="kl-stepper">
-                  <button onClick={() => setQty(String(Math.max(0, (Number(qty) || 0) - 1)))}>−</button>
-                  <input type="text" inputMode="decimal" value={qty} onChange={(e) => setQty(e.target.value.replace(/[^0-9.]/g, ""))} />
-                  <button onClick={() => setQty(String((Number(qty) || 0) + 1))}>＋</button>
+            {rows.map((row, idx) => (
+              <div key={row.id} className="kl-siterow">
+                {rows.length > 1 && (
+                  <div className="kl-siterow-head">
+                    <span className="kl-siterow-no">現場 {idx + 1}</span>
+                    <button className="kl-siterow-del" onClick={() => removeRow(row.id)} aria-label="この現場を削除"><Trash2 size={14} /></button>
+                  </div>
+                )}
+                <Field label="現場名・品名">
+                  <input type="text" value={row.site} onChange={(e) => updateRow(row.id, { site: e.target.value })} placeholder="例）中央砕石～6号 / 十三残土引き取り" />
+                  {siteSuggestions.length > 0 && (
+                    <div className="kl-chips kl-chips-sub">
+                      {siteSuggestions.map((s) => (
+                        <button key={s} className={"kl-chip kl-chip-s" + (row.site === s ? " is-on" : "")} onClick={() => applyRowSite(row.id, s)}>{s}</button>
+                      ))}
+                    </div>
+                  )}
+                </Field>
+                <div className="kl-row2">
+                  <Field label="数量">
+                    <div className="kl-stepper">
+                      <button onClick={() => updateRow(row.id, { qty: String(Math.max(0, (Number(row.qty) || 0) - 1)) })}>−</button>
+                      <input type="text" inputMode="decimal" value={row.qty} onChange={(e) => updateRow(row.id, { qty: e.target.value.replace(/[^0-9.]/g, "") })} />
+                      <button onClick={() => updateRow(row.id, { qty: String((Number(row.qty) || 0) + 1) })}>＋</button>
+                    </div>
+                  </Field>
+                  <Field label="単位">
+                    <div className="kl-chips">
+                      {units.map((u) => (
+                        <button key={u} className={"kl-chip" + (row.unit === u ? " is-on" : "")} onClick={() => updateRow(row.id, { unit: u })}>{u}</button>
+                      ))}
+                    </div>
+                  </Field>
                 </div>
-              </Field>
-              <Field label="単位">
-                <div className="kl-chips">
-                  {units.map((u) => (
-                    <button key={u} className={"kl-chip" + (unit === u ? " is-on" : "")} onClick={() => setUnit(u)}>{u}</button>
-                  ))}
-                </div>
-              </Field>
-            </div>
-            <Field label={unit === "㎏" ? "単価（円/t）※㎏入力×t単価で自動計算" : "単価（円・税抜）"}>
-              <input type="text" inputMode="numeric" value={unitPrice}
-                onChange={(e) => setUnitPrice(e.target.value.replace(/[^0-9]/g, ""))}
-                placeholder="例）3550" />
-            </Field>
+                <Field label={row.unit === "㎏" ? "単価（円/t）※㎏入力×t単価で自動計算" : "単価（円・税抜）"}>
+                  <input type="text" inputMode="numeric" value={row.unitPrice}
+                    onChange={(e) => updateRow(row.id, { unitPrice: e.target.value.replace(/[^0-9]/g, "") })}
+                    placeholder="例）3550" />
+                </Field>
+                {rows.length > 1 && (
+                  <div className="kl-siterow-amount">この現場の金額 <b>{yen(calcAmount(row.qty, row.unitPrice, row.unit))}</b></div>
+                )}
+              </div>
+            ))}
+            {!isEdit && (
+              <button className="kl-addsite" onClick={addRow}><Plus size={16} /> 現場を追加（同じ日・車・運転手のまま）</button>
+            )}
           </>
         ) : (
           <Field label="高速代金額（円・非課税）">
@@ -872,7 +910,7 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
         )}
 
         <div className="kl-amount">
-          <span>金額{type === "toll" ? "（非課税）" : "（税抜）"}</span>
+          <span>{type === "toll" ? "金額（非課税）" : validRows.length > 1 ? `合計金額（税抜・${validRows.length}件）` : "金額（税抜）"}</span>
           <b>{yen(amount)}</b>
         </div>
 
@@ -918,7 +956,7 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
 
       <div className="kl-sheet-foot">
         <button className="kl-save" disabled={!canSave} onClick={submit}>
-          <Check size={20} strokeWidth={2.6} /> 保存する{amount > 0 ? `（${yen(amount)}）` : ""}
+          <Check size={20} strokeWidth={2.6} /> 保存する{amount > 0 ? `（${yen(amount)}${type === "normal" && validRows.length > 1 ? `・${validRows.length}件` : ""}）` : ""}
         </button>
       </div>
     </div>
@@ -1605,6 +1643,15 @@ button{ font-family:inherit; }
 .kl-amount{ display:flex; align-items:center; justify-content:space-between; background:#fff; border:1.5px solid var(--line); border-left:4px solid var(--accent); border-radius:12px; padding:12px 16px; margin-bottom:14px; }
 .kl-amount span{ font-size:12.5px; font-weight:800; color:var(--ink2); }
 .kl-amount b{ font-size:22px; font-weight:800; font-variant-numeric:tabular-nums; }
+
+/* 複数現場の行ブロック */
+.kl-siterow{ border:1.5px solid var(--line); border-radius:14px; padding:14px 14px 4px; margin-bottom:14px; background:#FBFAF6; }
+.kl-siterow-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+.kl-siterow-no{ font-size:12.5px; font-weight:800; color:var(--accent); background:var(--accent-soft); padding:3px 10px; border-radius:99px; }
+.kl-siterow-del{ width:32px; height:32px; border:none; background:var(--bg); border-radius:9px; color:#C0392B; display:grid; place-items:center; cursor:pointer; }
+.kl-siterow-amount{ text-align:right; font-size:12.5px; font-weight:700; color:var(--ink2); padding:2px 2px 12px; }
+.kl-siterow-amount b{ font-size:14px; font-weight:800; color:var(--ink); font-variant-numeric:tabular-nums; }
+.kl-addsite{ width:100%; min-height:48px; margin-bottom:14px; border:1.5px dashed var(--accent); background:var(--accent-soft); color:var(--accent); border-radius:12px; font-size:14px; font-weight:800; display:flex; align-items:center; justify-content:center; gap:7px; cursor:pointer; }
 
 .kl-photoup{ width:100%; aspect-ratio:16/9; border:1.5px dashed var(--line); border-radius:12px; background:var(--card); display:grid; place-items:center; gap:4px; color:var(--muted); cursor:pointer; font-size:13px; font-weight:700; overflow:hidden; padding:0; }
 .kl-photoup img{ width:100%; height:100%; object-fit:cover; }
