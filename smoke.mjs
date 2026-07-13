@@ -12,6 +12,7 @@ for (const k of ["window","document","navigator","localStorage","HTMLElement","E
 }
 globalThis.window = w;
 globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+w.HTMLElement.prototype.scrollIntoView = function () {}; // jsdom未実装のポリフィル（実ブラウザは対応済み）
 w.prompt = globalThis.prompt = () => "1234";
 w.confirm = globalThis.confirm = () => true;
 w.alert = globalThis.alert = (m) => console.log("ALERT:", m);
@@ -52,6 +53,74 @@ prevArrow.dispatchEvent(new w.Event("click", { bubbles: true }));
 await new Promise(r => setTimeout(r, 300));
 const t4 = w.document.body.textContent;
 console.log("--- 請求書6月: オクノ¥6,690,775?:", t4.includes("6,690,775"), "/ M.S¥1,676,864?:", t4.includes("1,676,864"));
+console.log("--- CSVボタン表示?:", t4.includes("月次データをCSVでエクスポート"));
+
+// CSVエクスポートの中身を検証（bundleが参照するグローバルBlob/URLをフック）
+let capturedCsv = null;
+const OrigBlob = globalThis.Blob;
+globalThis.Blob = class extends OrigBlob {
+  constructor(parts, opts) { super(parts, opts); capturedCsv = parts[0]; }
+};
+const origCreateObjectURL = globalThis.URL.createObjectURL;
+globalThis.URL.createObjectURL = () => "blob:mock";
+const origAClick = w.HTMLAnchorElement.prototype.click;
+w.HTMLAnchorElement.prototype.click = function () {}; // jsdomのnavigationエラーを避ける
+const csvBtn = [...w.document.querySelectorAll("button")].find(b => b.textContent.includes("CSVでエクスポート"));
+csvBtn.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 200));
+console.log("--- CSV生成された?:", !!capturedCsv, "/ BOM付き?:", capturedCsv && capturedCsv.charCodeAt(0) === 0xFEFF);
+console.log("--- CSVヘッダ正しい?:", capturedCsv && capturedCsv.includes("日付,取引先,現場名・品名,数量,単位,単価,金額,車番,運転手,区分,メモ"));
+console.log("--- CSVにオクノ行あり?:", capturedCsv && capturedCsv.includes("オクノナマコン"));
+globalThis.Blob = OrigBlob; globalThis.URL.createObjectURL = origCreateObjectURL; w.HTMLAnchorElement.prototype.click = origAClick;
+
+// 日報タブ → グループ切替（ダンプ別／運転手別／取引先別）を検証
+navBtns.find(b => b.textContent.includes("日報")).dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 300));
+const prevArrow2 = w.document.querySelector('.kl-monthnav button[aria-label="前月"]');
+prevArrow2.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 300));
+console.log("--- 日報タブ: グループボタン4種表示?:", ["日別", "ダンプ別", "運転手別", "取引先別"].every(l => w.document.body.textContent.includes(l)));
+
+const clickTab = (label) => {
+  const btn = [...w.document.querySelectorAll(".kl-grouptabs button")].find(b => b.textContent === label);
+  btn.dispatchEvent(new w.Event("click", { bubbles: true }));
+};
+clickTab("ダンプ別");
+await new Promise(r => setTimeout(r, 300));
+console.log("--- ダンプ別: 車番9003見出しあり?:", w.document.body.textContent.includes("車番 9003"));
+
+clickTab("運転手別");
+await new Promise(r => setTimeout(r, 300));
+console.log("--- 運転手別: 未設定グループの見出しあり?:", w.document.body.textContent.includes("運転手未設定")); // seedデータは運転手未入力のため
+
+clickTab("取引先別");
+await new Promise(r => setTimeout(r, 300));
+console.log("--- 取引先別: オクノ見出しあり?:", w.document.body.textContent.includes("株式会社オクノナマコン"));
+
+clickTab("日別");
+await new Promise(r => setTimeout(r, 300));
+console.log("--- 日別に戻せた?:", w.document.body.textContent.includes("6/") || w.document.body.textContent.includes("5/"));
+
+// 実際に運転手を選んで記録を1件保存し、運転手別グルーピング＋アバター表示を検証
+const fabBtn = w.document.querySelector(".kl-fab");
+fabBtn.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 300));
+const clientChip = [...w.document.querySelectorAll(".kl-chip")].find(b => b.textContent.includes("オクノ"));
+clientChip.dispatchEvent(new w.Event("click", { bubbles: true }));
+const driverChip = [...w.document.querySelectorAll(".kl-chip-driver")].find(b => b.textContent.includes("善正"));
+console.log("--- フォームの運転手チップにアバター(kl-avatar)あり?:", w.document.querySelectorAll(".kl-chip-driver .kl-avatar").length > 0);
+driverChip.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 200));
+const saveBtn = [...w.document.querySelectorAll("button")].find(b => b.textContent.includes("保存する"));
+saveBtn.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 400));
+console.log("--- 保存後 日報カードに運転手名(善正)表示?:", w.document.body.textContent.includes("山田 善正"));
+console.log("--- 保存後 カードにアバター(kl-avatar)描画?:", w.document.querySelectorAll(".kl-rec-avatar .kl-avatar").length > 0);
+
+clickTab("運転手別");
+await new Promise(r => setTimeout(r, 300));
+console.log("--- 運転手別: 山田善正の見出しグループが出た?:", w.document.body.textContent.includes("山田 善正"));
+console.log("--- 運転手別: グループ見出しにアバターあり?:", w.document.querySelectorAll(".kl-sechead .kl-avatar").length > 0);
 
 // 従業員モードテスト: モードリセット→従業員選択
 w.localStorage.removeItem("kline4:mode");

@@ -77,6 +77,26 @@ const calcAmount = (qty, price, unit) => {
   return Math.round(q * p);
 };
 
+/* ---------- 運転手カラー（名前ごとに固定色を割り当て・見分けやすくする） ---------- */
+const DRIVER_PALETTE = ["#B03A2A", "#2B5CAB", "#1E7F4F", "#9A6A00", "#6B4FA0", "#B0466B", "#2E8B8B", "#8A5B2E"];
+const driverColor = (name) => {
+  if (!name) return "#8A8F98";
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return DRIVER_PALETTE[h % DRIVER_PALETTE.length];
+};
+const shortName = (name) => (name || "").split(" ")[0] || name || "";
+function DriverAvatar({ name, size = 20 }) {
+  if (!name) return null;
+  const color = driverColor(name);
+  const initial = shortName(name).trim()[0] || "?";
+  return (
+    <span className="kl-avatar" style={{ width: size, height: size, minWidth: size, background: color, fontSize: Math.round(size * 0.5) }}>
+      {initial}
+    </span>
+  );
+}
+
 /* ---------- 初期データ（実データからプリセット） ---------- */
 const DEF_COMPANY = {
   name: "株式会社K-LINE",
@@ -430,7 +450,7 @@ function RoleSelect({ employees, onWorker, onAdmin }) {
         <div className="kl-role-list">
           {employees.filter((e) => e.role !== "代表取締役").map((e) => (
             <button key={e.id} className="kl-role-btn" onClick={() => onWorker(e.name)}>
-              <Users size={18} /> {e.name} <span>{e.role}</span>
+              <DriverAvatar name={e.name} size={30} /> {e.name} <span>{e.role}</span>
             </button>
           ))}
         </div>
@@ -454,7 +474,7 @@ function WorkerView({ name, records, onAdd, onEdit, onAdmin, highlightId, syncSt
           <div className="kl-brand"><Truck size={18} /> 株式会社K-LINE</div>
           <h1>{fmtDay(today)} の日報</h1>
         </div>
-        <span className="kl-worker-badge">{name.split(" ")[0]}</span>
+        <span className="kl-worker-badge"><DriverAvatar name={name} size={20} /> {name}</span>
       </header>
 
       <button className="kl-bigadd" onClick={onAdd}>
@@ -563,8 +583,14 @@ function HomeView({ records, onAdd, onEdit, goInvoice, goRecords }) {
    記録カード
    ============================================================ */
 function RecordCard({ r, onClick, showDate, highlight }) {
+  const dcolor = driverColor(r.driver);
   return (
     <button id={`rec-${r.id}`} className={"kl-rec" + (highlight ? " is-flash" : "")} onClick={onClick}>
+      {r.driver && (
+        <div className="kl-rec-avatar">
+          <DriverAvatar name={r.driver} size={34} />
+        </div>
+      )}
       <div className="kl-rec-l">
         <b>{r.client}</b>
         <span className="kl-rec-site">{r.site || "（現場未入力）"}</span>
@@ -574,8 +600,10 @@ function RecordCard({ r, onClick, showDate, highlight }) {
             ? <em className="kl-tag-toll">高速立替</em>
             : <em>{num(r.qty)}{r.unit}{r.unitPrice ? ` × ${num(r.unitPrice)}円` : ""}</em>}
           {r.vehicle && <em className="kl-tag">車番 {r.vehicle}</em>}
-          {r.driver && <em className="kl-tag">{r.driver}</em>}
         </span>
+        {r.driver && (
+          <span className="kl-rec-driver" style={{ color: dcolor }}>{r.driver}</span>
+        )}
       </div>
       <div className="kl-rec-r">
         <b>{yen(r.amount)}</b>
@@ -588,15 +616,41 @@ function RecordCard({ r, onClick, showDate, highlight }) {
 /* ============================================================
    日報一覧
    ============================================================ */
+const GROUP_TABS = [
+  { key: "day", label: "日別" },
+  { key: "vehicle", label: "ダンプ別" },
+  { key: "driver", label: "運転手別" },
+  { key: "client", label: "取引先別" },
+];
+
 function RecordsView({ records, month, setMonth, onEdit, highlightId, onAdd }) {
+  const [groupBy, setGroupBy] = useState("day");
   const monthRecs = useMemo(() => records.filter((r) => monthOf(r.date) === month), [records, month]);
-  const byDay = useMemo(() => {
-    const m = {};
-    monthRecs.forEach((r) => { (m[r.date] = m[r.date] || []).push(r); });
-    return Object.entries(m).sort((a, b) => b[0].localeCompare(a[0]));
-  }, [monthRecs]);
   const total = monthRecs.reduce((a, r) => a + (Number(r.amount) || 0), 0);
   const dai = monthRecs.filter((r) => r.unit === "台" && r.type !== "toll").reduce((a, r) => a + (Number(r.qty) || 0), 0);
+
+  const grouped = useMemo(() => {
+    const m = {};
+    monthRecs.forEach((r) => {
+      const k = groupBy === "day" ? r.date
+        : groupBy === "vehicle" ? (r.vehicle || "車番未設定")
+        : groupBy === "driver" ? (r.driver || "運転手未設定")
+        : (r.client || "取引先未設定");
+      (m[k] = m[k] || []).push(r);
+    });
+    const entries = Object.entries(m);
+    if (groupBy === "day") {
+      entries.sort((a, b) => b[0].localeCompare(a[0]));
+    } else {
+      entries.forEach(([, rs]) => rs.sort((a, b) => b.date.localeCompare(a.date) || (b.createdAt || 0) - (a.createdAt || 0)));
+      entries.sort((a, b) => {
+        const sa = a[1].reduce((s, r) => s + (Number(r.amount) || 0), 0);
+        const sb = b[1].reduce((s, r) => s + (Number(r.amount) || 0), 0);
+        return sb - sa;
+      });
+    }
+    return entries;
+  }, [monthRecs, groupBy]);
 
   useEffect(() => {
     if (highlightId) {
@@ -614,24 +668,36 @@ function RecordsView({ records, month, setMonth, onEdit, highlightId, onAdd }) {
         <div><span>売上（税抜）</span><b>{yen(total)}</b></div>
       </div>
 
-      {byDay.length === 0 && (
+      <div className="kl-grouptabs">
+        {GROUP_TABS.map((t) => (
+          <button key={t.key} className={groupBy === t.key ? "is-on" : ""} onClick={() => setGroupBy(t.key)}>{t.label}</button>
+        ))}
+      </div>
+
+      {grouped.length === 0 && (
         <div className="kl-empty">
           {fmtMonth(month)}の記録はありません。
           <button className="kl-empty-add" onClick={onAdd}><Plus size={16} /> 記録を追加</button>
         </div>
       )}
 
-      {byDay.map(([date, rs]) => {
+      {grouped.map(([key, rs]) => {
         const dsum = rs.reduce((a, r) => a + (Number(r.amount) || 0), 0);
+        const days = new Set(rs.map((r) => r.date)).size;
+        const isDay = groupBy === "day";
+        const headerText = isDay ? fmtDay(key) : groupBy === "vehicle" ? `車番 ${key}` : key;
         return (
-          <section key={date} className="kl-section">
+          <section key={key} className="kl-section">
             <div className="kl-sechead">
-              <h2>{fmtDay(date)}</h2>
-              <span className="kl-secsum">{rs.length}件・{yen(dsum)}</span>
+              <h2>
+                {groupBy === "driver" && key !== "運転手未設定" && <DriverAvatar name={key} size={19} />}
+                {headerText}
+              </h2>
+              <span className="kl-secsum">{!isDay ? `${days}日・` : ""}{rs.length}件・{yen(dsum)}</span>
             </div>
             <div className="kl-cards">
               {rs.map((r) => (
-                <RecordCard key={r.id} r={r} onClick={() => onEdit(r)} highlight={r.id === highlightId} />
+                <RecordCard key={r.id} r={r} onClick={() => onEdit(r)} highlight={r.id === highlightId} showDate={!isDay} />
               ))}
             </div>
           </section>
@@ -821,12 +887,16 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
           </Field>
           <Field label="運転手">
             {lockedDriver ? (
-              <div className="kl-chips"><span className="kl-chip is-on">{lockedDriver}</span></div>
+              <div className="kl-chips">
+                <span className="kl-chip kl-chip-driver is-on"><DriverAvatar name={lockedDriver} size={18} /> {lockedDriver}</span>
+              </div>
             ) : (
               <div className="kl-chips">
                 {employees.map((p) => (
-                  <button key={p.id} className={"kl-chip" + (driver === p.name ? " is-on" : "")}
-                    onClick={() => setDriver(driver === p.name ? "" : p.name)}>{p.name.split(" ")[0]}</button>
+                  <button key={p.id} className={"kl-chip kl-chip-driver" + (driver === p.name ? " is-on" : "")}
+                    onClick={() => setDriver(driver === p.name ? "" : p.name)}>
+                    <DriverAvatar name={p.name} size={18} /> {p.name}
+                  </button>
                 ))}
               </div>
             )}
@@ -867,7 +937,31 @@ function Field({ label, children }) {
 /* ============================================================
    請求書一覧
    ============================================================ */
+const csvEscape = (v) => {
+  const s = String(v ?? "");
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+};
+
 function InvoiceListView({ records, clients, month, setMonth, onPreview }) {
+  const exportMonthCSV = () => {
+    const monthRecs = records.filter((r) => monthOf(r.date) === month).sort((a, b) => a.date.localeCompare(b.date));
+    if (monthRecs.length === 0) { window.alert(`${fmtMonth(month)}の記録がありません。`); return; }
+    const header = ["日付", "取引先", "現場名・品名", "数量", "単位", "単価", "金額", "車番", "運転手", "区分", "メモ"];
+    const lines = [header.join(",")];
+    monthRecs.forEach((r) => {
+      lines.push([
+        r.date, r.client, r.site || "", r.qty, r.unit, r.unitPrice, r.amount,
+        r.vehicle || "", r.driver || "", r.type === "toll" ? "高速立替" : "運搬", r.memo || "",
+      ].map(csvEscape).join(","));
+    });
+    const csv = "﻿" + lines.join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `kline-${month}-月次データ.csv`;
+    a.click();
+  };
+
   const rows = clients.map((c) => {
     const { from, to } = closingPeriod(month, c.closing);
     const rs = records.filter((r) => r.client === c.name && r.date >= from && r.date <= to);
@@ -884,6 +978,10 @@ function InvoiceListView({ records, clients, month, setMonth, onPreview }) {
     <div className="kl-page">
       <MonthNav month={month} setMonth={setMonth} title="請求書" />
       <p className="kl-note">締め日（20日／末）に合わせて対象期間を自動集計します。タップでプレビュー → 印刷・PDF保存。</p>
+
+      <button className="kl-csvbtn" onClick={exportMonthCSV}>
+        <FileText size={16} /> {fmtMonth(month)}の月次データをCSVでエクスポート
+      </button>
 
       {active.length === 0 && <div className="kl-empty">{fmtMonth(month)}締めの対象記録がありません。<br />日報を記録すると自動で集計されます。</div>}
 
@@ -1416,26 +1514,40 @@ button{ font-family:inherit; }
 /* sections */
 .kl-section{ margin-top:20px; }
 .kl-sechead{ display:flex; align-items:baseline; justify-content:space-between; margin-bottom:8px; }
-.kl-sechead h2{ font-size:14px; font-weight:800; color:var(--ink2); margin:0; }
+.kl-sechead h2{ font-size:14px; font-weight:800; color:var(--ink2); margin:0; display:flex; align-items:center; gap:6px; }
 .kl-secsum{ font-size:13px; font-weight:800; color:var(--ink); font-variant-numeric:tabular-nums; }
 .kl-cards{ display:flex; flex-direction:column; gap:8px; }
 .kl-empty{ background:var(--card); border:1.5px dashed var(--line); border-radius:14px; padding:26px 16px; text-align:center; color:var(--muted); font-size:13.5px; line-height:1.7; }
 .kl-empty-add{ display:inline-flex; align-items:center; gap:5px; margin-top:10px; border:none; background:var(--accent-soft); color:var(--accent); font-weight:800; font-size:13.5px; padding:9px 16px; border-radius:10px; cursor:pointer; }
 
 /* record card */
-.kl-rec{ width:100%; text-align:left; display:flex; justify-content:space-between; align-items:center; gap:10px;
+.kl-rec{ width:100%; text-align:left; display:flex; justify-content:space-between; align-items:center; gap:11px;
   background:var(--card); border:1px solid var(--line); border-radius:13px; padding:12px 14px; box-shadow:var(--shadow); cursor:pointer; }
 .kl-rec:active{ background:#FCFAF5; }
-.kl-rec-l{ min-width:0; display:flex; flex-direction:column; gap:2px; }
+.kl-rec-avatar{ flex:0 0 auto; }
+.kl-rec-l{ min-width:0; flex:1; display:flex; flex-direction:column; gap:2px; }
 .kl-rec-l > b{ font-size:15px; font-weight:800; }
 .kl-rec-site{ font-size:13px; color:var(--ink2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .kl-rec-meta{ display:flex; flex-wrap:wrap; gap:6px; margin-top:2px; }
 .kl-rec-meta em{ font-style:normal; font-size:11.5px; color:var(--muted); font-weight:700; }
 .kl-tag{ background:var(--bg); border-radius:6px; padding:1px 6px; }
 .kl-tag-toll{ background:#EDF4FF; color:#2B5CAB; border-radius:6px; padding:1px 6px; }
+.kl-rec-driver{ font-size:12.5px; font-weight:800; margin-top:2px; }
 .kl-rec-r{ text-align:right; flex:0 0 auto; }
 .kl-rec-r b{ font-size:16px; font-weight:800; font-variant-numeric:tabular-nums; }
 .kl-rec-photo{ color:var(--muted); margin-top:3px; }
+
+/* driver avatar */
+.kl-avatar{ display:inline-flex; align-items:center; justify-content:center; border-radius:50%; color:#fff; font-weight:800; flex:0 0 auto; line-height:1; }
+.kl-chip-driver{ display:inline-flex; align-items:center; gap:6px; }
+
+/* group tabs (日報の分け方) */
+.kl-grouptabs{ display:flex; background:#EBE8E0; border-radius:12px; padding:4px; margin:14px 0 4px; gap:2px; }
+.kl-grouptabs button{ flex:1; min-height:38px; border:none; border-radius:9px; background:none; font-size:11.5px; font-weight:800; color:var(--ink2); cursor:pointer; padding:0 2px; white-space:nowrap; }
+.kl-grouptabs button.is-on{ background:#fff; color:var(--accent); box-shadow:var(--shadow); }
+
+/* csv export */
+.kl-csvbtn{ width:100%; margin:0 0 18px; min-height:46px; border:1.5px solid var(--line); background:var(--card); border-radius:12px; font-size:13.5px; font-weight:800; color:var(--ink); display:flex; align-items:center; justify-content:center; gap:7px; cursor:pointer; box-shadow:var(--shadow); }
 @keyframes flash{ 0%{background:#FFF3D6; box-shadow:0 0 0 3px #F4C445;} 100%{background:var(--card); box-shadow:var(--shadow);} }
 .kl-rec.is-flash{ animation:flash 2.2s ease forwards; }
 
