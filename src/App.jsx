@@ -140,8 +140,8 @@ const INITIAL_RECORDS = (() => {
    カンタ側でSupabaseプロジェクト作成後、下記2行を埋めて再デプロイすると
    全端末の日報が自動同期される。空の間は完全オフライン動作（現状どおり）。
    anon keyは公開前提のキー（テーブル権限はRLSで制限）。 */
-const SYNC_URL = "";     // 例: "https://xxxx.supabase.co"
-const SYNC_ANON_KEY = ""; // Supabase anon public key
+const SYNC_URL = "https://nhcgemajrsnyzkvjiyme.supabase.co";
+const SYNC_ANON_KEY = "sb_publishable_XDs36aBeJEVok0yTyWK3Kw_QIiKaKKW"; // 公開可のpublishableキー（RLSで保護）
 const SYNC_TABLE = "kline_records";
 const syncEnabled = () => Boolean(SYNC_URL && SYNC_ANON_KEY);
 

@@ -80,3 +80,5 @@ await new Promise(r => setTimeout(r, 400));
 const tf = w2.document.body.textContent;
 console.log("--- フォーム開いた?:", tf.includes("保存する"), "/ 運転手固定?:", tf.includes("山田 善正"));
 console.log("--- ALL DONE");
+
+console.log("EXIT");process.exit(0);
