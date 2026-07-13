@@ -871,22 +871,20 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
                     </div>
                   )}
                 </Field>
-                <div className="kl-row2">
-                  <Field label="数量">
-                    <div className="kl-stepper">
-                      <button onClick={() => updateRow(row.id, { qty: String(Math.max(0, (Number(row.qty) || 0) - 1)) })}>−</button>
-                      <input type="text" inputMode="decimal" value={row.qty} onChange={(e) => updateRow(row.id, { qty: e.target.value.replace(/[^0-9.]/g, "") })} />
-                      <button onClick={() => updateRow(row.id, { qty: String((Number(row.qty) || 0) + 1) })}>＋</button>
-                    </div>
-                  </Field>
-                  <Field label="単位">
-                    <div className="kl-chips">
-                      {units.map((u) => (
-                        <button key={u} className={"kl-chip" + (row.unit === u ? " is-on" : "")} onClick={() => updateRow(row.id, { unit: u })}>{u}</button>
-                      ))}
-                    </div>
-                  </Field>
-                </div>
+                <Field label="数量">
+                  <div className="kl-stepper kl-stepper-lg">
+                    <button onClick={() => updateRow(row.id, { qty: String(Math.max(0, (Number(row.qty) || 0) - 1)) })}>−</button>
+                    <input type="text" inputMode="decimal" value={row.qty} onChange={(e) => updateRow(row.id, { qty: e.target.value.replace(/[^0-9.]/g, "") })} />
+                    <button onClick={() => updateRow(row.id, { qty: String((Number(row.qty) || 0) + 1) })}>＋</button>
+                  </div>
+                </Field>
+                <Field label="単位">
+                  <div className="kl-chips">
+                    {units.map((u) => (
+                      <button key={u} className={"kl-chip" + (row.unit === u ? " is-on" : "")} onClick={() => updateRow(row.id, { unit: u })}>{u}</button>
+                    ))}
+                  </div>
+                </Field>
                 <Field label={row.unit === "㎏" ? "単価（円/t）※㎏入力×t単価で自動計算" : "単価（円・税抜）"}>
                   <input type="text" inputMode="numeric" value={row.unitPrice}
                     onChange={(e) => updateRow(row.id, { unitPrice: e.target.value.replace(/[^0-9]/g, "") })}
@@ -1637,8 +1635,11 @@ button{ font-family:inherit; }
 .kl-chip-s{ min-height:36px; padding:6px 11px; font-size:12.5px; color:var(--ink2); }
 
 .kl-stepper{ display:flex; align-items:stretch; border:1.5px solid var(--line); border-radius:12px; background:var(--card); overflow:hidden; }
-.kl-stepper button{ width:48px; border:none; background:var(--bg); font-size:22px; font-weight:700; color:var(--ink2); cursor:pointer; }
+.kl-stepper button{ width:48px; border:none; background:var(--bg); font-size:22px; font-weight:700; color:var(--ink2); cursor:pointer; flex:0 0 auto; }
 .kl-stepper input{ flex:1; width:100%; min-width:0; border:none; text-align:center; font-size:18px; font-weight:800; outline:none; padding:10px 4px; font-variant-numeric:tabular-nums; }
+.kl-stepper-lg{ min-height:58px; }
+.kl-stepper-lg button{ width:52px; font-size:26px; }
+.kl-stepper-lg input{ font-size:28px; padding:10px 6px; letter-spacing:-.01em; }
 
 .kl-amount{ display:flex; align-items:center; justify-content:space-between; background:#fff; border:1.5px solid var(--line); border-left:4px solid var(--accent); border-radius:12px; padding:12px 16px; margin-bottom:14px; }
 .kl-amount span{ font-size:12.5px; font-weight:800; color:var(--ink2); }
