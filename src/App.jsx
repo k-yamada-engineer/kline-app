@@ -342,6 +342,23 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /* iOS Safariのピンチズーム抑止（viewportのuser-scalable=noはSafariに無視されるため、
+     ジェスチャーイベント自体をブロックする。業務アプリのため拡大操作は不要） */
+  useEffect(() => {
+    const prevent = (e) => e.preventDefault();
+    document.addEventListener("gesturestart", prevent, { passive: false });
+    document.addEventListener("gesturechange", prevent, { passive: false });
+    document.addEventListener("gestureend", prevent, { passive: false });
+    const preventPinch = (e) => { if (e.touches && e.touches.length > 1) e.preventDefault(); };
+    document.addEventListener("touchmove", preventPinch, { passive: false });
+    return () => {
+      document.removeEventListener("gesturestart", prevent);
+      document.removeEventListener("gesturechange", prevent);
+      document.removeEventListener("gestureend", prevent);
+      document.removeEventListener("touchmove", preventPinch);
+    };
+  }, []);
+
   /* recsは1件のオブジェクトでも配列でもよい（複数現場まとめ登録に対応） */
   const saveRecord = (recs) => {
     const list = (Array.isArray(recs) ? recs : [recs]).map((r) => ({ ...r, updatedAt: Date.now() }));
