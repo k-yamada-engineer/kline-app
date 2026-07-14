@@ -181,6 +181,58 @@ if (editCard) {
   console.log("--- 編集モード確認: 現場Aカードが見つからずスキップ");
 }
 
+// 単位管理（設定画面）: "t" を新規追加できるか
+navBtns.find(b => b.textContent.includes("設定")).dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 300));
+console.log("--- 設定に単位カードあり?:", w.document.body.textContent.includes("単位（5種）"));
+const setNativeVal = Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, "value").set;
+const unitInputs = [...w.document.querySelectorAll(".kl-addrow input")];
+const unitInput = unitInputs.find(i => i.placeholder && i.placeholder.includes("単位を追加"));
+setNativeVal.call(unitInput, "t");
+unitInput.dispatchEvent(new w.Event("input", { bubbles: true }));
+const unitAddBtn = unitInput.closest(".kl-addrow").querySelector(".kl-rowadd");
+unitAddBtn.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 200));
+console.log("--- 単位「t」が追加され6種になった?:", w.document.body.textContent.includes("単位（6種）"));
+console.log("--- localStorageのunitsに\"t\"が入った?:", JSON.parse(w.localStorage.getItem("kline4:units") || "[]").includes("t"));
+
+// 新規記録フォームで単位「t」を選択→そのまま掛け算(kgの/1000変換なし)になることを検証
+w.document.querySelector(".kl-fab").dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 300));
+const clientChip3 = [...w.document.querySelectorAll(".kl-chip")].find(b => b.textContent.includes("オクノ"));
+clientChip3.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+const tUnitBtn = [...w.document.querySelectorAll(".kl-chip")].find(b => b.textContent.trim() === "t");
+console.log("--- フォームの単位チップに\"t\"が表示?:", !!tUnitBtn);
+tUnitBtn.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+const qtyInput = [...w.document.querySelectorAll('input[inputmode="decimal"]')][0];
+setNativeVal.call(qtyInput, "10");
+qtyInput.dispatchEvent(new w.Event("input", { bubbles: true }));
+const priceInputT = [...w.document.querySelectorAll('input[inputmode="numeric"]')].find(i => i.placeholder === "例）3550");
+setNativeVal.call(priceInputT, "5000");
+priceInputT.dispatchEvent(new w.Event("input", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+console.log("--- 単位t: 10×5000円=¥50,000(kgのような/1000変換なし)?:", w.document.body.textContent.includes("50,000"));
+// フォームを閉じる（保存せず破棄）
+const closeBtn2 = w.document.querySelector(".kl-sheet-head .kl-iconbtn");
+closeBtn2.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 200));
+
+// 請求書プレビュー: SP幅ではカード表示・PC幅では表表示に切り替わることを検証
+navBtns.find(b => b.textContent.includes("請求書")).dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 300));
+const prevArrow3 = w.document.querySelector('.kl-monthnav button[aria-label="前月"]');
+prevArrow3.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 300));
+const okunoInvBtn = [...w.document.querySelectorAll(".kl-invcard")].find(b => b.textContent.includes("オクノ"));
+okunoInvBtn.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 300));
+console.log("--- 請求書プレビュー開いた(明細テーブルとカード両方DOMに存在)?:",
+  !!w.document.querySelector(".kl-doc-table-wrap") && !!w.document.querySelector(".kl-doc-cards"));
+console.log("--- カード側に現場名が表示されている?:", w.document.querySelectorAll(".kl-doc-card-site").length > 0);
+console.log("--- colgroupで列幅指定されている(車番列9%)?:", w.document.querySelector(".kl-doc-table col:last-child")?.style.width === "9%");
+
 // 従業員モードテスト: モードリセット→従業員選択
 w.localStorage.removeItem("kline4:mode");
 console.log("--- done");

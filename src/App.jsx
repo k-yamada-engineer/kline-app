@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import {
   Home as HomeIcon, ListChecks, Plus, Settings as SettingsIcon, Truck,
   FileText, ChevronLeft, ChevronRight, Trash2, X, Camera, Building2,
-  Receipt, Pencil, Download, Upload, Check, Users, Printer, JapaneseYen
+  Receipt, Pencil, Download, Upload, Check, Users, Printer, JapaneseYen, Ruler
 } from "lucide-react";
 import SEED_RECORDS from "./seed.json";
 
@@ -390,6 +390,7 @@ export default function App() {
               clients={clients} setClients={setClients}
               employees={employees} setEmployees={setEmployees}
               vehicles={vehicles} setVehicles={setVehicles}
+              units={units} setUnits={setUnits}
               records={records} setRecords={setRecords}
               pin={pin} setPin={setPin} setMode={setMode}
               syncState={syncState} lastSyncAt={lastSyncAt} pendingCount={pendingIds.length + Object.keys(tombstones).length}
@@ -1113,42 +1114,76 @@ function InvoiceDoc({ company, client, ym, records, onClose }) {
         </table>
 
         <h2 className="kl-doc-h2">御請求明細書</h2>
-        <table className="kl-doc-table">
-          <thead>
-            <tr><th>年月日</th><th>現場名・品名</th><th className="ta-r">数量</th><th>単位</th><th className="ta-r">単価</th><th className="ta-r">金額</th><th>車番</th></tr>
-          </thead>
-          <tbody>
-            {normal.map((r) => (
-              <tr key={r.id}>
-                <td>{r.date.replaceAll("-", "/")}</td>
-                <td>{r.site || ""}</td>
-                <td className="ta-r">{num(r.qty)}</td>
-                <td>{r.unit}</td>
-                <td className="ta-r">{num(r.unitPrice)}</td>
-                <td className="ta-r">{num(r.amount)}</td>
-                <td>{r.vehicle || ""}</td>
+        <div className="kl-doc-table-wrap">
+          <table className="kl-doc-table">
+            <colgroup>
+              <col style={{ width: "12%" }} /><col style={{ width: "36%" }} /><col style={{ width: "9%" }} />
+              <col style={{ width: "7%" }} /><col style={{ width: "13%" }} /><col style={{ width: "14%" }} /><col style={{ width: "9%" }} />
+            </colgroup>
+            <thead>
+              <tr><th>年月日</th><th>現場名・品名</th><th className="ta-r">数量</th><th>単位</th><th className="ta-r">単価</th><th className="ta-r">金額</th><th>車番</th></tr>
+            </thead>
+            <tbody>
+              {normal.map((r) => (
+                <tr key={r.id}>
+                  <td>{r.date.replaceAll("-", "/")}</td>
+                  <td>{r.site || ""}</td>
+                  <td className="ta-r">{num(r.qty)}</td>
+                  <td>{r.unit}</td>
+                  <td className="ta-r">{num(r.unitPrice)}</td>
+                  <td className="ta-r">{num(r.amount)}</td>
+                  <td>{r.vehicle || ""}</td>
+                </tr>
+              ))}
+              <tr className="kl-doc-subrow">
+                <td colSpan={5}>合計（税抜）</td>
+                <td className="ta-r">{num(sub)}</td>
+                <td></td>
               </tr>
-            ))}
-            <tr className="kl-doc-subrow">
-              <td colSpan={5}>合計（税抜）</td>
-              <td className="ta-r">{num(sub)}</td>
-              <td></td>
-            </tr>
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
+        <div className="kl-doc-cards">
+          {normal.map((r) => (
+            <div key={r.id} className="kl-doc-card">
+              <div className="kl-doc-card-top">
+                <span>{r.date.replaceAll("-", "/")}</span>
+                {r.vehicle && <span className="kl-doc-card-veh">車番 {r.vehicle}</span>}
+              </div>
+              <div className="kl-doc-card-site">{r.site || "（現場名なし）"}</div>
+              <div className="kl-doc-card-bottom">
+                <span>{num(r.qty)}{r.unit} × {num(r.unitPrice)}円</span>
+                <b>¥{num(r.amount)}</b>
+              </div>
+            </div>
+          ))}
+          <div className="kl-doc-cardtotal"><span>合計（税抜）</span><b>¥{num(sub)}</b></div>
+        </div>
 
         {toll.length > 0 && (
           <>
             <h2 className="kl-doc-h2">高速立替明細（非課税）</h2>
-            <table className="kl-doc-table">
-              <thead><tr><th>年月日</th><th>現場名・品名</th><th className="ta-r">金額</th></tr></thead>
-              <tbody>
-                {toll.map((r) => (
-                  <tr key={r.id}><td>{r.date.replaceAll("-", "/")}</td><td>{r.site || "高速代"}</td><td className="ta-r">{num(r.amount)}</td></tr>
-                ))}
-                <tr className="kl-doc-subrow"><td colSpan={2}>高速立替合計（非課税）</td><td className="ta-r">{num(tollSum)}</td></tr>
-              </tbody>
-            </table>
+            <div className="kl-doc-table-wrap">
+              <table className="kl-doc-table">
+                <colgroup><col style={{ width: "20%" }} /><col style={{ width: "60%" }} /><col style={{ width: "20%" }} /></colgroup>
+                <thead><tr><th>年月日</th><th>現場名・品名</th><th className="ta-r">金額</th></tr></thead>
+                <tbody>
+                  {toll.map((r) => (
+                    <tr key={r.id}><td>{r.date.replaceAll("-", "/")}</td><td>{r.site || "高速代"}</td><td className="ta-r">{num(r.amount)}</td></tr>
+                  ))}
+                  <tr className="kl-doc-subrow"><td colSpan={2}>高速立替合計（非課税）</td><td className="ta-r">{num(tollSum)}</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div className="kl-doc-cards">
+              {toll.map((r) => (
+                <div key={r.id} className="kl-doc-tollcard">
+                  <span>{r.date.replaceAll("-", "/")}　{r.site || "高速代"}</span>
+                  <b>¥{num(r.amount)}</b>
+                </div>
+              ))}
+              <div className="kl-doc-cardtotal"><span>高速立替合計（非課税）</span><b>¥{num(tollSum)}</b></div>
+            </div>
           </>
         )}
 
@@ -1162,7 +1197,7 @@ function InvoiceDoc({ company, client, ym, records, onClose }) {
 /* ============================================================
    設定
    ============================================================ */
-function SettingsView({ company, setCompany, clients, setClients, employees, setEmployees, vehicles, setVehicles, records, setRecords, pin, setPin, setMode, syncState, lastSyncAt, pendingCount, onSyncNow, showToast }) {
+function SettingsView({ company, setCompany, clients, setClients, employees, setEmployees, vehicles, setVehicles, units, setUnits, records, setRecords, pin, setPin, setMode, syncState, lastSyncAt, pendingCount, onSyncNow, showToast }) {
   const setC = (k) => (e) => setCompany({ ...company, [k]: e.target.value });
   const importRef = useRef(null);
 
@@ -1235,7 +1270,7 @@ function SettingsView({ company, setCompany, clients, setClients, employees, set
       </SettingCard>
 
       <SettingCard icon={<Receipt size={17} />} title={`取引先（${clients.length}社）`}>
-        <ClientList clients={clients} setClients={setClients} />
+        <ClientList clients={clients} setClients={setClients} units={units} />
       </SettingCard>
 
       <SettingCard icon={<Users size={17} />} title={`従業員（${employees.length}名）`}>
@@ -1289,6 +1324,10 @@ function SettingsView({ company, setCompany, clients, setClients, employees, set
         />
       </SettingCard>
 
+      <SettingCard icon={<Ruler size={17} />} title={`単位（${units.length}種）`}>
+        <UnitList units={units} setUnits={setUnits} />
+      </SettingCard>
+
       <SettingCard icon={<FileText size={17} />} title="データ管理">
         <div className="kl-datacount">
           <div><b>{records.length}</b><span>記録</span></div>
@@ -1336,7 +1375,7 @@ function ClosingPicker({ value, onChange }) {
 }
 
 /* 取引先リスト（詳細編集つき） */
-function ClientList({ clients, setClients }) {
+function ClientList({ clients, setClients, units }) {
   const [name, setName] = useState("");
   const [openId, setOpenId] = useState(null);
   const add = () => {
@@ -1390,7 +1429,7 @@ function ClientList({ clients, setClients }) {
                 </Field>
                 <Field label="既定単位（任意）">
                   <div className="kl-chips">
-                    {DEF_UNITS.map((u) => (
+                    {units.map((u) => (
                       <button key={u} className={"kl-chip kl-chip-s" + ((c.defaultUnit || "") === u ? " is-on" : "")}
                         onClick={() => patch(c.id, "defaultUnit", c.defaultUnit === u ? "" : u)}>{u}</button>
                     ))}
@@ -1501,6 +1540,40 @@ function PersonList({ items, setItems, fields }) {
   );
 }
 
+/* 単位リスト（チップ＋削除・追加。台/㎏/㎥/日/式 のような単純な文字列配列） */
+function UnitList({ units, setUnits }) {
+  const [draft, setDraft] = useState("");
+  const add = () => {
+    const v = draft.trim();
+    if (!v || units.includes(v)) return;
+    setUnits([...units, v]);
+    setDraft("");
+  };
+  const del = (u) => {
+    if (units.length <= 1) { window.alert("単位は最低1つ必要です。"); return; }
+    if (window.confirm(`単位「${u}」を削除しますか？`)) setUnits(units.filter((x) => x !== u));
+  };
+  return (
+    <div>
+      <div className="kl-chips">
+        {units.map((u) => (
+          <span key={u} className="kl-chip kl-chip-unit">
+            {u}
+            <button onClick={() => del(u)} aria-label={`${u}を削除`}><X size={13} /></button>
+          </span>
+        ))}
+      </div>
+      <div className="kl-addrow">
+        <input value={draft} placeholder="単位を追加（例：t・m・回）"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") add(); }} />
+        <button className="kl-rowadd" onClick={add}><Plus size={17} /></button>
+      </div>
+      <p className="kl-note">「㎏」は現場の実務に合わせ入力量(kg)×トン単価で自動計算されます。それ以外の単位（tなど）は入力量×単価をそのまま計算します。</p>
+    </div>
+  );
+}
+
 /* ============================================================
    スタイル
    ============================================================ */
@@ -1574,6 +1647,8 @@ button{ font-family:inherit; }
 /* driver avatar */
 .kl-avatar{ display:inline-flex; align-items:center; justify-content:center; border-radius:50%; color:#fff; font-weight:800; flex:0 0 auto; line-height:1; }
 .kl-chip-driver{ display:inline-flex; align-items:center; gap:6px; }
+.kl-chip-unit{ display:inline-flex; align-items:center; gap:6px; }
+.kl-chip-unit button{ width:18px; height:18px; border:none; background:var(--bg); border-radius:50%; color:var(--muted); display:grid; place-items:center; cursor:pointer; padding:0; }
 
 /* group tabs (日報の分け方) */
 .kl-grouptabs{ display:flex; background:#EBE8E0; border-radius:12px; padding:4px; margin:14px 0 4px; gap:2px; }
@@ -1747,12 +1822,37 @@ button{ font-family:inherit; }
 .kl-doc-sumtable th{ background:#F1EEE6; font-size:11.5px; }
 .kl-doc-sumtable td{ font-size:14.5px; font-weight:700; font-variant-numeric:tabular-nums; }
 .kl-doc-h2{ font-size:14px; margin:20px 0 8px; letter-spacing:.15em; }
-.kl-doc-table{ width:100%; border-collapse:collapse; }
-.kl-doc-table th, .kl-doc-table td{ border:1px solid #333; padding:5px 8px; font-size:11.5px; }
+.kl-doc-table-wrap{ overflow-x:auto; }
+.kl-doc-table{ width:100%; border-collapse:collapse; table-layout:fixed; }
+.kl-doc-table th, .kl-doc-table td{ border:1px solid #333; padding:5px 8px; font-size:11.5px; overflow-wrap:break-word; }
 .kl-doc-table th{ background:#F1EEE6; font-weight:700; text-align:center; }
 .kl-doc-table .ta-r{ text-align:right; font-variant-numeric:tabular-nums; }
 .kl-doc-subrow td{ font-weight:700; background:#FAF8F2; }
 .kl-doc-note{ font-size:11px; color:#333; margin-top:14px; }
+
+/* 明細のスマホ用カード表示（PC・印刷は上の表を使う） */
+.kl-doc-cards{ display:none; flex-direction:column; gap:8px; }
+.kl-doc-card{ border:1px solid #ccc; border-radius:9px; padding:10px 12px; background:#fff; }
+.kl-doc-card-top{ display:flex; justify-content:space-between; align-items:center; font-size:11px; color:#555; margin-bottom:5px; }
+.kl-doc-card-veh{ background:#F1EEE6; border-radius:5px; padding:1px 7px; font-weight:700; }
+.kl-doc-card-site{ font-size:15px; font-weight:700; color:#111; line-height:1.45; margin-bottom:7px; }
+.kl-doc-card-bottom{ display:flex; justify-content:space-between; align-items:baseline; font-size:12px; color:#444; gap:8px; }
+.kl-doc-card-bottom b{ font-size:16.5px; color:#111; font-variant-numeric:tabular-nums; flex:0 0 auto; }
+.kl-doc-tollcard{ display:flex; justify-content:space-between; align-items:center; gap:10px; border:1px solid #ccc; border-radius:9px; padding:9px 12px; background:#fff; font-size:12.5px; }
+.kl-doc-tollcard b{ font-size:14.5px; font-variant-numeric:tabular-nums; }
+.kl-doc-cardtotal{ display:flex; justify-content:space-between; background:#FAF8F2; border:1px solid #ccc; border-radius:9px; padding:10px 12px; font-weight:700; font-size:13px; }
+.kl-doc-cardtotal b{ font-size:16.5px; font-variant-numeric:tabular-nums; }
+
+@media (max-width:680px){
+  .kl-doc{ padding:20px 16px 30px; }
+  .kl-doc-title{ font-size:21px; letter-spacing:.22em; }
+  .kl-doc-head{ flex-direction:column; }
+  .kl-doc-client{ min-width:100%; }
+  .kl-doc-sumtable th, .kl-doc-sumtable td{ padding:6px 3px; font-size:9.5px; }
+  .kl-doc-sumtable td{ font-size:11.5px; }
+  .kl-doc-table-wrap{ display:none; }
+  .kl-doc-cards{ display:flex; }
+}
 
 /* print */
 @page{ size:A4; margin:12mm; }
@@ -1761,6 +1861,8 @@ button{ font-family:inherit; }
   .app-ui, .no-print{ display:none !important; }
   .kl-invoverlay{ position:static !important; background:#fff !important; overflow:visible !important; padding:0 !important; }
   .kl-doc{ box-shadow:none !important; margin:0 !important; max-width:none !important; padding:0 !important; }
+  .kl-doc-table-wrap{ display:block !important; }
+  .kl-doc-cards{ display:none !important; }
 }
     `}</style>
   );
