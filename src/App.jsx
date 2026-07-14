@@ -19,6 +19,27 @@ const saveLS = (k, v) => {
   try { localStorage.setItem(k, JSON.stringify(v)); return true; }
   catch { return false; }
 };
+/* モーダル表示中に背面ページを完全ロック（iOSのゴムスクロール対策） */
+function useLockBodyScroll() {
+  useEffect(() => {
+    const y = window.scrollY;
+    const b = document.body;
+    b.style.position = "fixed";
+    b.style.top = `-${y}px`;
+    b.style.left = "0";
+    b.style.right = "0";
+    b.style.width = "100%";
+    return () => {
+      b.style.position = "";
+      b.style.top = "";
+      b.style.left = "";
+      b.style.right = "";
+      b.style.width = "";
+      window.scrollTo(0, y);
+    };
+  }, []);
+}
+
 function usePersist(key, def) {
   const [v, setV] = useState(() => LS(key, def));
   useEffect(() => { saveLS(key, v); }, [key, v]);
@@ -759,6 +780,7 @@ function MonthNav({ month, setMonth, title }) {
 const emptySiteRow = () => ({ id: uid(), site: "", qty: "1", unit: "台", unitPrice: "" });
 
 function RecordForm({ record, records, clients, vehicles, employees, units, onSave, onDelete, onClose, lockedDriver }) {
+  useLockBodyScroll();
   const isEdit = !!record;
   const [type, setType] = useState(record?.type || "normal");
   const [date, setDate] = useState(record?.date || todayISO());
@@ -1083,6 +1105,7 @@ function InvoiceListView({ records, clients, month, setMonth, onPreview }) {
    請求書ドキュメント（プレビュー＋印刷）
    ============================================================ */
 function InvoiceDoc({ company, client, ym, records, onClose }) {
+  useLockBodyScroll();
   if (!client) return null;
   const { from, to } = closingPeriod(ym, client.closing);
   const rs = records
@@ -1834,7 +1857,8 @@ button{ font-family:inherit; }
 @media (max-width:680px){
   .kl-doc{ padding:18px 12px 28px; margin:10px auto; }
   .kl-doc-title{ font-size:20px; letter-spacing:.22em; }
-  .kl-doc-head{ flex-direction:column; }
+  .kl-doc-head{ flex-direction:column; gap:14px; }
+  .kl-doc-to, .kl-doc-from{ flex:0 0 auto; }
   .kl-doc-client{ min-width:100%; }
   .kl-doc-total b{ font-size:20px; }
   .kl-doc-sumtable th, .kl-doc-sumtable td{ padding:6px 2px; font-size:9px; }
