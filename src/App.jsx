@@ -71,10 +71,25 @@ const closingLabel = (closing) => (closing === "末" ? "末締" : `${parseInt(cl
 /* ---------- formatting ---------- */
 const yen = (n) => "¥" + Math.round(Number(n) || 0).toLocaleString("ja-JP");
 const num = (n) => (Number(n) || 0).toLocaleString("ja-JP");
-const calcAmount = (qty, price, unit) => {
-  const q = Number(qty) || 0, p = Number(price) || 0;
-  if (unit === "㎏") return Math.round((q * p) / 1000); // ㎏数量 × 円/t 単価
-  return Math.round(q * p);
+/* 金額 = 数量 × 単価（単位による自動変換は行わない） */
+const calcAmount = (qty, price) => Math.round((Number(qty) || 0) * (Number(price) || 0));
+
+/* 旧バージョンの「㎏入力×トン単価÷1000」で保存されたレコードを t 表記に正規化する。
+   金額は変えず、数量だけ 1/1000（kg→t）にして「数量×単価＝金額」が成立する形に直す。 */
+const migrateKgRecords = (list) => {
+  let changed = false;
+  const out = list.map((r) => {
+    if (r && r.type !== "toll" && r.unit === "㎏" && Number(r.qty) > 0 && Number(r.unitPrice) > 0) {
+      const flat = Math.round(Number(r.qty) * Number(r.unitPrice));
+      const legacy = Math.round((Number(r.qty) * Number(r.unitPrice)) / 1000);
+      if (flat !== r.amount && legacy === r.amount) {
+        changed = true;
+        return { ...r, qty: Math.round((Number(r.qty) / 1000) * 100) / 100, unit: "t" };
+      }
+    }
+    return r;
+  });
+  return { records: out, changed };
 };
 
 /* ---------- 運転手カラー（名前ごとに固定色を割り当て・見分けやすくする） ---------- */
@@ -143,7 +158,7 @@ const DEF_VEHICLES = [
   { id: "v5", number: "93", name: "ダンプ 93", note: "" },
   { id: "v6", number: "585", name: "ダンプ 585", note: "" },
 ];
-const DEF_UNITS = ["台", "㎏", "㎥", "日", "式"];
+const DEF_UNITS = ["台", "㎏", "t", "㎥", "日", "式"];
 const K = {
   company: "kline4:company", clients: "kline4:clients", employees: "kline4:employees",
   vehicles: "kline4:vehicles", units: "kline4:units", records: "kline4:records",
@@ -153,7 +168,7 @@ const K = {
    旧バージョン(kline3)でユーザーが入れた記録があれば引き継ぐ。 */
 const INITIAL_RECORDS = (() => {
   const legacy = LS("kline3:records", []).filter((r) => r && !String(r.id).startsWith("seed"));
-  return [...SEED_RECORDS, ...legacy];
+  return migrateKgRecords([...SEED_RECORDS, ...legacy]).records;
 })();
 
 /* ---------- 同期（Supabase / PostgREST） ----------
@@ -291,6 +306,19 @@ export default function App() {
     const onVis = () => { if (!document.hidden) syncRef.current(); };
     document.addEventListener("visibilitychange", onVis);
     return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
+
+  /* 起動時マイグレーション：旧㎏換算レコードのt正規化＋単位「t」の一度きり追加 */
+  useEffect(() => {
+    setRecords((prev) => {
+      const { records: migrated, changed } = migrateKgRecords(prev);
+      return changed ? migrated : prev;
+    });
+    if (!localStorage.getItem("kline4:tUnitAdded")) {
+      setUnits((prev) => (prev.includes("t") ? prev : [...prev.slice(0, 2), "t", ...prev.slice(2)]));
+      localStorage.setItem("kline4:tUnitAdded", "1");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* recsは1件のオブジェクトでも配列でもよい（複数現場まとめ登録に対応） */
@@ -789,7 +817,7 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
   const validRows = rows.filter((r) => Number(r.qty) > 0);
   const amount = type === "toll"
     ? Math.round(Number(tollAmount) || 0)
-    : rows.reduce((sum, r) => sum + calcAmount(r.qty, r.unitPrice, r.unit), 0);
+    : rows.reduce((sum, r) => sum + calcAmount(r.qty, r.unitPrice), 0);
 
   const canSave = client && date && (type === "toll" ? amount > 0 : validRows.length > 0);
 
@@ -812,7 +840,7 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
       : validRows.map((r) => ({
           id: isEdit ? record.id : r.id, type: "normal", ...common,
           site: r.site, qty: Number(r.qty) || 0, unit: r.unit, unitPrice: Number(r.unitPrice) || 0,
-          amount: calcAmount(r.qty, r.unitPrice, r.unit),
+          amount: calcAmount(r.qty, r.unitPrice),
           createdAt: record?.createdAt || Date.now(),
         }));
     onSave(toSave);
@@ -884,13 +912,13 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
                     ))}
                   </div>
                 </Field>
-                <Field label={row.unit === "㎏" ? "単価（円/t）※㎏入力×t単価で自動計算" : "単価（円・税抜）"}>
+                <Field label="単価（円・税抜）">
                   <input type="text" inputMode="numeric" value={row.unitPrice}
                     onChange={(e) => updateRow(row.id, { unitPrice: e.target.value.replace(/[^0-9]/g, "") })}
                     placeholder="例）3550" />
                 </Field>
                 {rows.length > 1 && (
-                  <div className="kl-siterow-amount">この現場の金額 <b>{yen(calcAmount(row.qty, row.unitPrice, row.unit))}</b></div>
+                  <div className="kl-siterow-amount">この現場の金額 <b>{yen(calcAmount(row.qty, row.unitPrice))}</b></div>
                 )}
               </div>
             ))}
@@ -1114,76 +1142,47 @@ function InvoiceDoc({ company, client, ym, records, onClose }) {
         </table>
 
         <h2 className="kl-doc-h2">御請求明細書</h2>
-        <div className="kl-doc-table-wrap">
-          <table className="kl-doc-table">
-            <colgroup>
-              <col style={{ width: "12%" }} /><col style={{ width: "36%" }} /><col style={{ width: "9%" }} />
-              <col style={{ width: "7%" }} /><col style={{ width: "13%" }} /><col style={{ width: "14%" }} /><col style={{ width: "9%" }} />
-            </colgroup>
-            <thead>
-              <tr><th>年月日</th><th>現場名・品名</th><th className="ta-r">数量</th><th>単位</th><th className="ta-r">単価</th><th className="ta-r">金額</th><th>車番</th></tr>
-            </thead>
-            <tbody>
-              {normal.map((r) => (
-                <tr key={r.id}>
-                  <td>{r.date.replaceAll("-", "/")}</td>
-                  <td>{r.site || ""}</td>
-                  <td className="ta-r">{num(r.qty)}</td>
-                  <td>{r.unit}</td>
-                  <td className="ta-r">{num(r.unitPrice)}</td>
-                  <td className="ta-r">{num(r.amount)}</td>
-                  <td>{r.vehicle || ""}</td>
-                </tr>
-              ))}
-              <tr className="kl-doc-subrow">
-                <td colSpan={5}>合計（税抜）</td>
-                <td className="ta-r">{num(sub)}</td>
-                <td></td>
+        <table className="kl-doc-table">
+          <colgroup>
+            <col style={{ width: "15%" }} /><col style={{ width: "36%" }} /><col style={{ width: "11%" }} />
+            <col style={{ width: "6%" }} /><col style={{ width: "10%" }} /><col style={{ width: "14%" }} /><col style={{ width: "8%" }} />
+          </colgroup>
+          <thead>
+            <tr><th>年月日</th><th>現場名・品名</th><th className="ta-r">数量</th><th>単位</th><th className="ta-r">単価</th><th className="ta-r">金額</th><th>車番</th></tr>
+          </thead>
+          <tbody>
+            {normal.map((r) => (
+              <tr key={r.id}>
+                <td className="kl-doc-date">{r.date.replaceAll("-", "/")}</td>
+                <td>{r.site || ""}</td>
+                <td className="ta-r">{num(r.qty)}</td>
+                <td className="kl-doc-unit">{r.unit}</td>
+                <td className="ta-r">{num(r.unitPrice)}</td>
+                <td className="ta-r">{num(r.amount)}</td>
+                <td className="kl-doc-veh">{r.vehicle || ""}</td>
               </tr>
-            </tbody>
-          </table>
-        </div>
-        <div className="kl-doc-cards">
-          {normal.map((r) => (
-            <div key={r.id} className="kl-doc-card">
-              <div className="kl-doc-card-top">
-                <span>{r.date.replaceAll("-", "/")}</span>
-                {r.vehicle && <span className="kl-doc-card-veh">車番 {r.vehicle}</span>}
-              </div>
-              <div className="kl-doc-card-site">{r.site || "（現場名なし）"}</div>
-              <div className="kl-doc-card-bottom">
-                <span>{num(r.qty)}{r.unit} × {num(r.unitPrice)}円</span>
-                <b>¥{num(r.amount)}</b>
-              </div>
-            </div>
-          ))}
-          <div className="kl-doc-cardtotal"><span>合計（税抜）</span><b>¥{num(sub)}</b></div>
-        </div>
+            ))}
+            <tr className="kl-doc-subrow">
+              <td colSpan={5}>合計（税抜）</td>
+              <td className="ta-r">{num(sub)}</td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
 
         {toll.length > 0 && (
           <>
             <h2 className="kl-doc-h2">高速立替明細（非課税）</h2>
-            <div className="kl-doc-table-wrap">
-              <table className="kl-doc-table">
-                <colgroup><col style={{ width: "20%" }} /><col style={{ width: "60%" }} /><col style={{ width: "20%" }} /></colgroup>
-                <thead><tr><th>年月日</th><th>現場名・品名</th><th className="ta-r">金額</th></tr></thead>
-                <tbody>
-                  {toll.map((r) => (
-                    <tr key={r.id}><td>{r.date.replaceAll("-", "/")}</td><td>{r.site || "高速代"}</td><td className="ta-r">{num(r.amount)}</td></tr>
-                  ))}
-                  <tr className="kl-doc-subrow"><td colSpan={2}>高速立替合計（非課税）</td><td className="ta-r">{num(tollSum)}</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <div className="kl-doc-cards">
-              {toll.map((r) => (
-                <div key={r.id} className="kl-doc-tollcard">
-                  <span>{r.date.replaceAll("-", "/")}　{r.site || "高速代"}</span>
-                  <b>¥{num(r.amount)}</b>
-                </div>
-              ))}
-              <div className="kl-doc-cardtotal"><span>高速立替合計（非課税）</span><b>¥{num(tollSum)}</b></div>
-            </div>
+            <table className="kl-doc-table">
+              <colgroup><col style={{ width: "18%" }} /><col style={{ width: "62%" }} /><col style={{ width: "20%" }} /></colgroup>
+              <thead><tr><th>年月日</th><th>現場名・品名</th><th className="ta-r">金額</th></tr></thead>
+              <tbody>
+                {toll.map((r) => (
+                  <tr key={r.id}><td className="kl-doc-date">{r.date.replaceAll("-", "/")}</td><td>{r.site || "高速代"}</td><td className="ta-r">{num(r.amount)}</td></tr>
+                ))}
+                <tr className="kl-doc-subrow"><td colSpan={2}>高速立替合計（非課税）</td><td className="ta-r">{num(tollSum)}</td></tr>
+              </tbody>
+            </table>
           </>
         )}
 
@@ -1569,7 +1568,7 @@ function UnitList({ units, setUnits }) {
           onKeyDown={(e) => { if (e.key === "Enter") add(); }} />
         <button className="kl-rowadd" onClick={add}><Plus size={17} /></button>
       </div>
-      <p className="kl-note">「㎏」は現場の実務に合わせ入力量(kg)×トン単価で自動計算されます。それ以外の単位（tなど）は入力量×単価をそのまま計算します。</p>
+      <p className="kl-note">すべての単位で「数量 × 単価 ＝ 金額」のまま計算されます（単位による自動変換はありません）。</p>
     </div>
   );
 }
@@ -1585,13 +1584,13 @@ function GlobalStyle() {
   --line:#E4E1D8; --accent:#B03A2A; --accent-soft:#F9E9E5; --green:#1E7F4F;
   --shadow:0 1px 3px rgba(25,20,10,.07);
 }
-*{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-html,body{ margin:0; padding:0; }
+*{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
+html,body{ margin:0; padding:0; width:100%; overflow-x:hidden; }
 body{ background:var(--bg); color:var(--ink);
   font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
-  font-size:15px; line-height:1.55; }
+  font-size:15px; line-height:1.55; overscroll-behavior-y:none; }
 button{ font-family:inherit; }
-.kl-root{ min-height:100dvh; }
+.kl-root{ min-height:100dvh; overflow-x:hidden; }
 .app-ui{ max-width:480px; margin:0 auto; }
 .kl-main{ padding:0 16px calc(96px + env(safe-area-inset-bottom)); }
 .kl-page{ padding-top:14px; }
@@ -1684,7 +1683,7 @@ button{ font-family:inherit; }
 .kl-sheet-head h2{ font-size:17px; font-weight:800; margin:0; }
 .kl-iconbtn{ width:40px; height:40px; border:none; background:var(--card); border-radius:12px; display:grid; place-items:center; color:var(--ink2); cursor:pointer; border:1px solid var(--line); }
 .kl-iconbtn.kl-danger{ color:#C0392B; }
-.kl-sheet-body{ flex:1; overflow-y:auto; padding:6px 16px 24px; }
+.kl-sheet-body{ flex:1; overflow-y:auto; padding:6px 16px 24px; overscroll-behavior:contain; }
 .kl-sheet-foot{ padding:10px 16px calc(14px + env(safe-area-inset-bottom)); background:linear-gradient(to top, var(--bg) 70%, transparent); }
 .kl-save{ width:100%; min-height:56px; border:none; border-radius:14px; background:var(--green); color:#fff; font-size:16.5px; font-weight:800; display:flex; align-items:center; justify-content:center; gap:8px; cursor:pointer; box-shadow:0 4px 14px rgba(30,127,79,.3); }
 .kl-save:disabled{ background:#C7CCD1; box-shadow:none; }
@@ -1792,7 +1791,7 @@ button{ font-family:inherit; }
 @keyframes pop{ from{opacity:0; transform:translate(-50%,8px);} to{opacity:1; transform:translate(-50%,0);} }
 
 /* ============ 請求書 ============ */
-.kl-invoverlay{ position:fixed; inset:0; z-index:100; background:#6B6E75; overflow-y:auto; padding:0 0 40px; }
+.kl-invoverlay{ position:fixed; inset:0; z-index:100; background:#6B6E75; overflow-y:auto; overflow-x:hidden; padding:0 0 40px; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; }
 .kl-invtools{ position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px; padding:10px 14px; background:rgba(38,40,44,.94); backdrop-filter:blur(8px); }
 .kl-invtools b{ flex:1; color:#fff; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .kl-printbtn{ display:flex; align-items:center; gap:6px; min-height:42px; padding:8px 16px; border:none; border-radius:11px; background:var(--accent); color:#fff; font-size:14px; font-weight:800; cursor:pointer; }
@@ -1822,36 +1821,26 @@ button{ font-family:inherit; }
 .kl-doc-sumtable th{ background:#F1EEE6; font-size:11.5px; }
 .kl-doc-sumtable td{ font-size:14.5px; font-weight:700; font-variant-numeric:tabular-nums; }
 .kl-doc-h2{ font-size:14px; margin:20px 0 8px; letter-spacing:.15em; }
-.kl-doc-table-wrap{ overflow-x:auto; }
 .kl-doc-table{ width:100%; border-collapse:collapse; table-layout:fixed; }
 .kl-doc-table th, .kl-doc-table td{ border:1px solid #333; padding:5px 8px; font-size:11.5px; overflow-wrap:break-word; }
 .kl-doc-table th{ background:#F1EEE6; font-weight:700; text-align:center; }
 .kl-doc-table .ta-r{ text-align:right; font-variant-numeric:tabular-nums; }
+.kl-doc-date{ white-space:nowrap; font-variant-numeric:tabular-nums; }
+.kl-doc-unit, .kl-doc-veh{ text-align:center; }
 .kl-doc-subrow td{ font-weight:700; background:#FAF8F2; }
 .kl-doc-note{ font-size:11px; color:#333; margin-top:14px; }
 
-/* 明細のスマホ用カード表示（PC・印刷は上の表を使う） */
-.kl-doc-cards{ display:none; flex-direction:column; gap:8px; }
-.kl-doc-card{ border:1px solid #ccc; border-radius:9px; padding:10px 12px; background:#fff; }
-.kl-doc-card-top{ display:flex; justify-content:space-between; align-items:center; font-size:11px; color:#555; margin-bottom:5px; }
-.kl-doc-card-veh{ background:#F1EEE6; border-radius:5px; padding:1px 7px; font-weight:700; }
-.kl-doc-card-site{ font-size:15px; font-weight:700; color:#111; line-height:1.45; margin-bottom:7px; }
-.kl-doc-card-bottom{ display:flex; justify-content:space-between; align-items:baseline; font-size:12px; color:#444; gap:8px; }
-.kl-doc-card-bottom b{ font-size:16.5px; color:#111; font-variant-numeric:tabular-nums; flex:0 0 auto; }
-.kl-doc-tollcard{ display:flex; justify-content:space-between; align-items:center; gap:10px; border:1px solid #ccc; border-radius:9px; padding:9px 12px; background:#fff; font-size:12.5px; }
-.kl-doc-tollcard b{ font-size:14.5px; font-variant-numeric:tabular-nums; }
-.kl-doc-cardtotal{ display:flex; justify-content:space-between; background:#FAF8F2; border:1px solid #ccc; border-radius:9px; padding:10px 12px; font-weight:700; font-size:13px; }
-.kl-doc-cardtotal b{ font-size:16.5px; font-variant-numeric:tabular-nums; }
-
+/* スマホ：表のまま画面幅にフィット（列幅はcolgroupで現場名優先の配分） */
 @media (max-width:680px){
-  .kl-doc{ padding:20px 16px 30px; }
-  .kl-doc-title{ font-size:21px; letter-spacing:.22em; }
+  .kl-doc{ padding:18px 12px 28px; margin:10px auto; }
+  .kl-doc-title{ font-size:20px; letter-spacing:.22em; }
   .kl-doc-head{ flex-direction:column; }
   .kl-doc-client{ min-width:100%; }
-  .kl-doc-sumtable th, .kl-doc-sumtable td{ padding:6px 3px; font-size:9.5px; }
-  .kl-doc-sumtable td{ font-size:11.5px; }
-  .kl-doc-table-wrap{ display:none; }
-  .kl-doc-cards{ display:flex; }
+  .kl-doc-total b{ font-size:20px; }
+  .kl-doc-sumtable th, .kl-doc-sumtable td{ padding:6px 2px; font-size:9px; }
+  .kl-doc-sumtable td{ font-size:11px; }
+  .kl-doc-table th, .kl-doc-table td{ padding:4px 3px; font-size:9px; }
+  .kl-doc-date{ font-size:8.5px !important; letter-spacing:-.03em; }
 }
 
 /* print */
@@ -1861,8 +1850,10 @@ button{ font-family:inherit; }
   .app-ui, .no-print{ display:none !important; }
   .kl-invoverlay{ position:static !important; background:#fff !important; overflow:visible !important; padding:0 !important; }
   .kl-doc{ box-shadow:none !important; margin:0 !important; max-width:none !important; padding:0 !important; }
-  .kl-doc-table-wrap{ display:block !important; }
-  .kl-doc-cards{ display:none !important; }
+  .kl-doc-table th, .kl-doc-table td{ padding:5px 8px !important; font-size:11.5px !important; }
+  .kl-doc-date{ font-size:11.5px !important; }
+  .kl-doc-sumtable th{ font-size:11.5px !important; padding:7px 10px !important; }
+  .kl-doc-sumtable td{ font-size:14.5px !important; padding:7px 10px !important; }
 }
     `}</style>
   );

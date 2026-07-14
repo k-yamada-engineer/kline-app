@@ -184,17 +184,17 @@ if (editCard) {
 // 単位管理（設定画面）: "t" を新規追加できるか
 navBtns.find(b => b.textContent.includes("設定")).dispatchEvent(new w.Event("click", { bubbles: true }));
 await new Promise(r => setTimeout(r, 300));
-console.log("--- 設定に単位カードあり?:", w.document.body.textContent.includes("単位（5種）"));
+console.log("--- 設定に単位カードあり(t込み6種)?:", w.document.body.textContent.includes("単位（6種）"));
 const setNativeVal = Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, "value").set;
 const unitInputs = [...w.document.querySelectorAll(".kl-addrow input")];
 const unitInput = unitInputs.find(i => i.placeholder && i.placeholder.includes("単位を追加"));
-setNativeVal.call(unitInput, "t");
+setNativeVal.call(unitInput, "回");
 unitInput.dispatchEvent(new w.Event("input", { bubbles: true }));
 const unitAddBtn = unitInput.closest(".kl-addrow").querySelector(".kl-rowadd");
 unitAddBtn.dispatchEvent(new w.Event("click", { bubbles: true }));
 await new Promise(r => setTimeout(r, 200));
-console.log("--- 単位「t」が追加され6種になった?:", w.document.body.textContent.includes("単位（6種）"));
-console.log("--- localStorageのunitsに\"t\"が入った?:", JSON.parse(w.localStorage.getItem("kline4:units") || "[]").includes("t"));
+console.log("--- 単位「回」が追加され7種になった?:", w.document.body.textContent.includes("単位（7種）"));
+console.log("--- localStorageのunitsに\"回\"が入った?:", JSON.parse(w.localStorage.getItem("kline4:units") || "[]").includes("回"));
 
 // 新規記録フォームで単位「t」を選択→そのまま掛け算(kgの/1000変換なし)になることを検証
 w.document.querySelector(".kl-fab").dispatchEvent(new w.Event("click", { bubbles: true }));
@@ -228,10 +228,11 @@ await new Promise(r => setTimeout(r, 300));
 const okunoInvBtn = [...w.document.querySelectorAll(".kl-invcard")].find(b => b.textContent.includes("オクノ"));
 okunoInvBtn.dispatchEvent(new w.Event("click", { bubbles: true }));
 await new Promise(r => setTimeout(r, 300));
-console.log("--- 請求書プレビュー開いた(明細テーブルとカード両方DOMに存在)?:",
-  !!w.document.querySelector(".kl-doc-table-wrap") && !!w.document.querySelector(".kl-doc-cards"));
-console.log("--- カード側に現場名が表示されている?:", w.document.querySelectorAll(".kl-doc-card-site").length > 0);
-console.log("--- colgroupで列幅指定されている(車番列9%)?:", w.document.querySelector(".kl-doc-table col:last-child")?.style.width === "9%");
+console.log("--- 請求書プレビュー: 表のみでカードDOMなし?:",
+  !!w.document.querySelector(".kl-doc-table") && !w.document.querySelector(".kl-doc-cards"));
+const cols = [...w.document.querySelectorAll(".kl-doc-table colgroup col")].map(c => c.style.width);
+console.log("--- colgroup配分(年月日15%/現場名36%/車番8%)?:", cols[0] === "15%" && cols[1] === "36%" && cols[6] === "8%");
+console.log("--- 明細の数量がt表記に正規化(15.68等の小数)?:", /15\.68|15\.77|16\.33/.test(w.document.querySelector(".kl-doc-table").textContent));
 
 // 従業員モードテスト: モードリセット→従業員選択
 w.localStorage.removeItem("kline4:mode");
