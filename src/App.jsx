@@ -92,20 +92,47 @@ const closingLabel = (closing) => (closing === "末" ? "末締" : `${parseInt(cl
 /* ---------- formatting ---------- */
 const yen = (n) => "¥" + Math.round(Number(n) || 0).toLocaleString("ja-JP");
 const num = (n) => (Number(n) || 0).toLocaleString("ja-JP");
-/* 金額 = 数量 × 単価（単位による自動変換は行わない） */
-const calcAmount = (qty, price) => Math.round((Number(qty) || 0) * (Number(price) || 0));
+/* 金額計算。㎏だけは現場の実務（実際の請求書と同じ）に合わせ「㎏入力 × トン単価 ÷ 1000」。
+   その他の単位（t含む）は 数量 × 単価 をそのまま。表記は入力した単位のまま変えない。 */
+const calcAmount = (qty, price, unit) => {
+  const q = Number(qty) || 0, p = Number(price) || 0;
+  if (unit === "㎏") return Math.round((q * p) / 1000);
+  return Math.round(q * p);
+};
 
-/* 旧バージョンの「㎏入力×トン単価÷1000」で保存されたレコードを t 表記に正規化する。
-   金額は変えず、数量だけ 1/1000（kg→t）にして「数量×単価＝金額」が成立する形に直す。 */
-const migrateKgRecords = (list) => {
+/* v3.11で誤ってt表記に変換されたレコードを、元の㎏表記に復元する（金額は不変）。
+   対象＝unit "t" かつ 数量が小数 かつ 数量×単価＝金額 が成立するもの（変換で作られた形）。
+   元からtで正しく入力された整数tレコードや、数量×単価≠金額のレコードは触らない。 */
+const SEED_BY_ID = new Map(SEED_RECORDS.map((r) => [r.id, r]));
+const restoreKgRecords = (list) => {
   let changed = false;
   const out = list.map((r) => {
-    if (r && r.type !== "toll" && r.unit === "㎏" && Number(r.qty) > 0 && Number(r.unitPrice) > 0) {
-      const flat = Math.round(Number(r.qty) * Number(r.unitPrice));
-      const legacy = Math.round((Number(r.qty) * Number(r.unitPrice)) / 1000);
-      if (flat !== r.amount && legacy === r.amount) {
+    if (!r || r.type === "toll") return r;
+    const q = Number(r.qty) || 0, p = Number(r.unitPrice) || 0;
+    if (q <= 0 || p <= 0) return r;
+    const seed = SEED_BY_ID.get(r.id);
+    if (seed) {
+      /* seed由来（6月実績）は原本と突合して厳密に巻き戻す。
+         v3.11の変換（㎏→t・数量1/1000）の形跡がある場合のみ復元し、
+         元からt表記の正当なレコード（日本製鉄48.44t等）には触らない。 */
+      if (r.unit === "t" && seed.unit === "㎏" && Math.abs(q * 1000 - Number(seed.qty)) < 1) {
         changed = true;
-        return { ...r, qty: Math.round((Number(r.qty) / 1000) * 100) / 100, unit: "t" };
+        return { ...r, qty: seed.qty, unit: seed.unit };
+      }
+      return r;
+    }
+    /* ユーザー入力分：小数tかつ数量×単価＝金額はv3.11変換の形→㎏へ復元 */
+    if (r.unit === "t" && !Number.isInteger(q) && Math.round(q * p) === Math.round(Number(r.amount) || 0)) {
+      changed = true;
+      return { ...r, qty: Math.round(q * 1000), unit: "㎏" };
+    }
+    /* v3.11〜13の期間に㎏のまま単純計算で保存されてしまった1000倍金額を修復 */
+    if (r.unit === "㎏" && q >= 1000) {
+      const flat = Math.round(q * p);
+      const legacy = Math.round((q * p) / 1000);
+      if (Math.round(Number(r.amount) || 0) === flat && flat !== legacy) {
+        changed = true;
+        return { ...r, amount: legacy };
       }
     }
     return r;
@@ -189,7 +216,7 @@ const K = {
    旧バージョン(kline3)でユーザーが入れた記録があれば引き継ぐ。 */
 const INITIAL_RECORDS = (() => {
   const legacy = LS("kline3:records", []).filter((r) => r && !String(r.id).startsWith("seed"));
-  return migrateKgRecords([...SEED_RECORDS, ...legacy]).records;
+  return [...SEED_RECORDS, ...legacy];
 })();
 
 /* ---------- 同期（Supabase / PostgREST） ----------
@@ -329,12 +356,27 @@ export default function App() {
     return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVis); };
   }, []);
 
-  /* 起動時マイグレーション：旧㎏換算レコードのt正規化＋単位「t」の一度きり追加 */
+  /* 起動時修復：v3.11で誤変換された㎏レコードの復元＋壊れた金額の修復（一度だけ）。
+     修復したレコードは同期にも流し、全端末に正しい形を伝播させる。 */
   useEffect(() => {
-    setRecords((prev) => {
-      const { records: migrated, changed } = migrateKgRecords(prev);
-      return changed ? migrated : prev;
-    });
+    if (!localStorage.getItem("kline4:kgRestored")) {
+      setRecords((prev) => {
+        const { records: restored, changed } = restoreKgRecords(prev);
+        if (!changed) return prev;
+        const now = Date.now();
+        const changedIds = [];
+        const stamped = restored.map((r, i) => {
+          if (r !== prev[i]) { changedIds.push(r.id); return { ...r, updatedAt: now }; }
+          return r;
+        });
+        if (syncEnabled() && changedIds.length > 0) {
+          setPendingIds((p) => [...new Set([...p, ...changedIds])]);
+          setTimeout(() => syncRef.current(), 800);
+        }
+        return stamped;
+      });
+      localStorage.setItem("kline4:kgRestored", "1");
+    }
     if (!localStorage.getItem("kline4:tUnitAdded")) {
       setUnits((prev) => (prev.includes("t") ? prev : [...prev.slice(0, 2), "t", ...prev.slice(2)]));
       localStorage.setItem("kline4:tUnitAdded", "1");
@@ -856,7 +898,7 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
   const validRows = rows.filter((r) => Number(r.qty) > 0);
   const amount = type === "toll"
     ? Math.round(Number(tollAmount) || 0)
-    : rows.reduce((sum, r) => sum + calcAmount(r.qty, r.unitPrice), 0);
+    : rows.reduce((sum, r) => sum + calcAmount(r.qty, r.unitPrice, r.unit), 0);
 
   const canSave = client && date && (type === "toll" ? amount > 0 : validRows.length > 0);
 
@@ -879,7 +921,7 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
       : validRows.map((r) => ({
           id: isEdit ? record.id : r.id, type: "normal", ...common,
           site: r.site, qty: Number(r.qty) || 0, unit: r.unit, unitPrice: Number(r.unitPrice) || 0,
-          amount: calcAmount(r.qty, r.unitPrice),
+          amount: calcAmount(r.qty, r.unitPrice, r.unit),
           createdAt: record?.createdAt || Date.now(),
         }));
     onSave(toSave);
@@ -951,13 +993,13 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
                     ))}
                   </div>
                 </Field>
-                <Field label="単価（円・税抜）">
+                <Field label={row.unit === "㎏" ? "単価（円/t）※㎏入力×t単価で自動計算" : "単価（円・税抜）"}>
                   <input type="text" inputMode="numeric" value={row.unitPrice}
                     onChange={(e) => updateRow(row.id, { unitPrice: e.target.value.replace(/[^0-9]/g, "") })}
                     placeholder="例）3550" />
                 </Field>
                 {rows.length > 1 && (
-                  <div className="kl-siterow-amount">この現場の金額 <b>{yen(calcAmount(row.qty, row.unitPrice))}</b></div>
+                  <div className="kl-siterow-amount">この現場の金額 <b>{yen(calcAmount(row.qty, row.unitPrice, row.unit))}</b></div>
                 )}
               </div>
             ))}
@@ -1608,7 +1650,7 @@ function UnitList({ units, setUnits }) {
           onKeyDown={(e) => { if (e.key === "Enter") add(); }} />
         <button className="kl-rowadd" onClick={add}><Plus size={17} /></button>
       </div>
-      <p className="kl-note">すべての単位で「数量 × 単価 ＝ 金額」のまま計算されます（単位による自動変換はありません）。</p>
+      <p className="kl-note">「㎏」だけは実際の請求書と同じ「㎏入力 × トン単価 ÷ 1000」で計算します。その他の単位（tなど）は「数量 × 単価」そのままです。表記は入力した単位のまま変わりません。</p>
     </div>
   );
 }

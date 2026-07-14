@@ -232,7 +232,27 @@ console.log("--- 請求書プレビュー: 表のみでカードDOMなし?:",
   !!w.document.querySelector(".kl-doc-table") && !w.document.querySelector(".kl-doc-cards"));
 const cols = [...w.document.querySelectorAll(".kl-doc-table colgroup col")].map(c => c.style.width);
 console.log("--- colgroup配分(年月日15%/現場名36%/車番8%)?:", cols[0] === "15%" && cols[1] === "36%" && cols[6] === "8%");
-console.log("--- 明細の数量がt表記に正規化(15.68等の小数)?:", /15\.68|15\.77|16\.33/.test(w.document.querySelector(".kl-doc-table").textContent));
+console.log("--- 明細の数量が㎏表記のまま(15,680等)?:", /15,680|15,770|16,330/.test(w.document.querySelector(".kl-doc-table").textContent));
+console.log("--- ㎏レコードが㎏のまま多数残存(オクノ128運行等)?:", JSON.parse(w.localStorage.getItem("kline4:records")).filter(r => r.unit === "㎏").length >= 120);
+
+// ㎏の計算がさっきまでの正確な式（㎏×トン単価÷1000）に戻っていることを検証
+w.document.querySelector(".kl-fab").dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 300));
+const clientChipKg = [...w.document.querySelectorAll(".kl-chip")].find(b => b.textContent.includes("M.S"));
+clientChipKg.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+const kgBtn = [...w.document.querySelectorAll(".kl-chip")].find(b => b.textContent.trim() === "㎏");
+kgBtn.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+const setNV = Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, "value").set;
+const qtyKg = [...w.document.querySelectorAll('input[inputmode="decimal"]')][0];
+setNV.call(qtyKg, "23500"); qtyKg.dispatchEvent(new w.Event("input", { bubbles: true }));
+const priceKg = [...w.document.querySelectorAll('input[inputmode="numeric"]')].find(i => i.placeholder === "例）3550");
+setNV.call(priceKg, "3260"); priceKg.dispatchEvent(new w.Event("input", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+console.log("--- ㎏計算復活: 23,500㎏×3,260円=¥76,610?:", w.document.body.textContent.includes("76,610") && !w.document.body.textContent.includes("76,610,000"));
+w.document.querySelector(".kl-sheet-head .kl-iconbtn").dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 200));
 
 // 従業員モードテスト: モードリセット→従業員選択
 w.localStorage.removeItem("kline4:mode");
