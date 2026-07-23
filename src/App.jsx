@@ -17,25 +17,27 @@ const LS = (k, def) => {
 };
 const saveLS = (k, v) => {
   try { localStorage.setItem(k, JSON.stringify(v)); return true; }
-  catch { return false; }
+  catch {
+    /* 容量超過等で保存に失敗したら黙殺せずアプリに通知する（黙って消えるのが最悪） */
+    try { window.dispatchEvent(new CustomEvent("kline-storage-error", { detail: { key: k } })); } catch { /* noop */ }
+    return false;
+  }
 };
-/* モーダル表示中に背面ページを完全ロック（iOSのゴムスクロール対策） */
+/* モーダル表示中の背面スクロール抑止。
+   position:fixed方式はiOSでキーボード表示と干渉してビューポートがズレたまま
+   固定される（＝全ページスクロール不能に見える）ため、overflow:hiddenのみにする。
+   シートは全面不透明なので背面が動かなければ十分。 */
 function useLockBodyScroll() {
   useEffect(() => {
-    const y = window.scrollY;
-    const b = document.body;
-    b.style.position = "fixed";
-    b.style.top = `-${y}px`;
-    b.style.left = "0";
-    b.style.right = "0";
-    b.style.width = "100%";
+    const html = document.documentElement;
+    const body = document.body;
+    const prevHtml = html.style.overflow;
+    const prevBody = body.style.overflow;
+    html.style.overflow = "hidden";
+    body.style.overflow = "hidden";
     return () => {
-      b.style.position = "";
-      b.style.top = "";
-      b.style.left = "";
-      b.style.right = "";
-      b.style.width = "";
-      window.scrollTo(0, y);
+      html.style.overflow = prevHtml;
+      body.style.overflow = prevBody;
     };
   }, []);
 }
@@ -303,6 +305,24 @@ export default function App() {
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2200);
   };
+
+  /* 端末保存(localStorage)が容量不足等で失敗したら必ずユーザーに知らせる。
+     以前は黙って失敗し「保存したはずの記録が再起動で消える」原因になり得た。 */
+  const storageWarnedRef = useRef(false);
+  useEffect(() => {
+    const onStorageError = () => {
+      setToast("⚠️ 端末の保存容量が不足しています");
+      if (!storageWarnedRef.current) {
+        storageWarnedRef.current = true;
+        setTimeout(() => {
+          window.alert("端末の保存容量がいっぱいで、記録が保存できない可能性があります。\n古い記録の受領書写真を削除してください（記録を開く→写真を削除）。\n直らない場合は寛太に連絡してください。");
+        }, 50);
+      }
+    };
+    window.addEventListener("kline-storage-error", onStorageError);
+    return () => window.removeEventListener("kline-storage-error", onStorageError);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const isWorker = mode?.type === "worker";
 
@@ -896,11 +916,17 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
   };
 
   const validRows = rows.filter((r) => Number(r.qty) > 0);
-  const amount = type === "toll"
-    ? Math.round(Number(tollAmount) || 0)
-    : rows.reduce((sum, r) => sum + calcAmount(r.qty, r.unitPrice, r.unit), 0);
-
-  const canSave = client && date && (type === "toll" ? amount > 0 : validRows.length > 0);
+  const tollAmt = Math.round(Number(tollAmount) || 0);
+  const transportTotal = rows.reduce((sum, r) => sum + calcAmount(r.qty, r.unitPrice, r.unit), 0);
+  /* 編集時は元の記録の種別だけを扱う（種別切替による上書き変換事故を防止）。
+     新規時は運搬と高速立替を同時に保存できる（1日分をまとめて登録する運用）。 */
+  const amount = isEdit
+    ? (type === "toll" ? tollAmt : transportTotal)
+    : transportTotal + tollAmt;
+  const canSave = Boolean(client && date && (isEdit
+    ? (type === "toll" ? tollAmt > 0 : validRows.length > 0)
+    : (validRows.length > 0 || tollAmt > 0)));
+  const saveCount = isEdit ? 1 : validRows.length + (tollAmt > 0 ? 1 : 0);
 
   const handlePhoto = async (e) => {
     const f = e.target.files?.[0];
@@ -912,18 +938,30 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
   const submit = () => {
     if (!canSave) return;
     const common = { date, client, vehicle, driver, memo, photo };
-    const toSave = type === "toll"
-      ? [{
-          id: record?.id || uid(), type: "toll", ...common,
-          qty: 1, unit: "式", unitPrice: amount, amount,
-          createdAt: record?.createdAt || Date.now(),
-        }]
-      : validRows.map((r) => ({
-          id: isEdit ? record.id : r.id, type: "normal", ...common,
-          site: r.site, qty: Number(r.qty) || 0, unit: r.unit, unitPrice: Number(r.unitPrice) || 0,
-          amount: calcAmount(r.qty, r.unitPrice, r.unit),
-          createdAt: record?.createdAt || Date.now(),
-        }));
+    const normalRec = (r, id, createdAt) => ({
+      id, type: "normal", ...common,
+      site: r.site, qty: Number(r.qty) || 0, unit: r.unit, unitPrice: Number(r.unitPrice) || 0,
+      amount: calcAmount(r.qty, r.unitPrice, r.unit),
+      createdAt,
+    });
+    const tollRec = (id, createdAt) => ({
+      id, type: "toll", ...common,
+      qty: 1, unit: "式", unitPrice: tollAmt, amount: tollAmt,
+      createdAt,
+    });
+    let toSave;
+    if (isEdit) {
+      /* 編集は元レコード1件の更新のみ（種別は固定） */
+      toSave = type === "toll"
+        ? [tollRec(record.id, record.createdAt || Date.now())]
+        : validRows.slice(0, 1).map((r) => normalRec(r, record.id, record.createdAt || Date.now()));
+    } else {
+      /* 新規は運搬（複数行）＋高速立替を同時保存 */
+      toSave = [
+        ...validRows.map((r) => normalRec(r, r.id, Date.now())),
+        ...(tollAmt > 0 ? [tollRec(uid(), Date.now())] : []),
+      ];
+    }
     onSave(toSave);
   };
 
@@ -938,10 +976,20 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
       </div>
 
       <div className="kl-sheet-body">
-        <div className="kl-typetab">
-          <button className={type === "normal" ? "is-on" : ""} onClick={() => setType("normal")}>運搬</button>
-          <button className={type === "toll" ? "is-on" : ""} onClick={() => setType("toll")}>高速立替（非課税）</button>
-        </div>
+        {isEdit ? (
+          <div className="kl-typetab">
+            <button className="is-on" disabled>{type === "toll" ? "高速立替（非課税）の編集" : "運搬の編集"}</button>
+          </div>
+        ) : (
+          <div className="kl-typetab">
+            <button className={type === "normal" ? "is-on" : ""} onClick={() => setType("normal")}>
+              運搬{validRows.length > 0 ? `（${validRows.length}）` : ""}
+            </button>
+            <button className={type === "toll" ? "is-on" : ""} onClick={() => setType("toll")}>
+              高速立替{tollAmt > 0 ? `（${yen(tollAmt)}）` : "（非課税）"}
+            </button>
+          </div>
+        )}
 
         <Field label="日付">
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -1008,15 +1056,31 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
             )}
           </>
         ) : (
-          <Field label="高速代金額（円・非課税）">
-            <input type="text" inputMode="numeric" value={tollAmount}
-              onChange={(e) => setTollAmount(e.target.value.replace(/[^0-9]/g, ""))}
-              placeholder="例）2020" />
-          </Field>
+          <>
+            <Field label="高速代金額（円・非課税）">
+              <input type="text" inputMode="numeric" value={tollAmount}
+                onChange={(e) => setTollAmount(e.target.value.replace(/[^0-9]/g, ""))}
+                placeholder="例）2020" />
+            </Field>
+            {!isEdit && validRows.length > 0 && (
+              <p className="kl-note">「運搬」タブに入力済みの{validRows.length}件（{yen(transportTotal)}）も一緒に保存されます。</p>
+            )}
+          </>
+        )}
+        {!isEdit && type === "normal" && tollAmt > 0 && (
+          <p className="kl-note">「高速立替」タブに入力済みの{yen(tollAmt)}も一緒に保存されます。</p>
         )}
 
         <div className="kl-amount">
-          <span>{type === "toll" ? "金額（非課税）" : validRows.length > 1 ? `合計金額（税抜・${validRows.length}件）` : "金額（税抜）"}</span>
+          <span>
+            {isEdit
+              ? (type === "toll" ? "金額（非課税）" : "金額（税抜）")
+              : validRows.length > 0 && tollAmt > 0
+                ? `合計金額（運搬${validRows.length}件＋高速立替）`
+                : tollAmt > 0
+                  ? "金額（非課税）"
+                  : validRows.length > 1 ? `合計金額（税抜・${validRows.length}件）` : "金額（税抜）"}
+          </span>
           <b>{yen(amount)}</b>
         </div>
 
@@ -1062,7 +1126,7 @@ function RecordForm({ record, records, clients, vehicles, employees, units, onSa
 
       <div className="kl-sheet-foot">
         <button className="kl-save" disabled={!canSave} onClick={submit}>
-          <Check size={20} strokeWidth={2.6} /> 保存する{amount > 0 ? `（${yen(amount)}${type === "normal" && validRows.length > 1 ? `・${validRows.length}件` : ""}）` : ""}
+          <Check size={20} strokeWidth={2.6} /> 保存する{amount > 0 ? `（${yen(amount)}${saveCount > 1 ? `・${saveCount}件` : ""}）` : ""}
         </button>
       </div>
     </div>

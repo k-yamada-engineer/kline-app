@@ -254,6 +254,52 @@ console.log("--- ㎏計算復活: 23,500㎏×3,260円=¥76,610?:", w.document.bo
 w.document.querySelector(".kl-sheet-head .kl-iconbtn").dispatchEvent(new w.Event("click", { bubbles: true }));
 await new Promise(r => setTimeout(r, 200));
 
+// --- v3.15: 運搬＋高速立替の同時保存／編集時の種別固定 ---
+const beforeMix = JSON.parse(w.localStorage.getItem("kline4:records")).length;
+const preOverflowBody = w.document.body.style.overflow, preOverflowHtml = w.document.documentElement.style.overflow;
+w.document.querySelector(".kl-fab").dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 300));
+[...w.document.querySelectorAll(".kl-chip")].find(b => b.textContent.includes("拓建材")).dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+const qtyMix = [...w.document.querySelectorAll('input[inputmode="decimal"]')][0];
+setNV.call(qtyMix, "2"); qtyMix.dispatchEvent(new w.Event("input", { bubbles: true }));
+const priceMix = [...w.document.querySelectorAll('input[inputmode="numeric"]')].find(i => i.placeholder === "例）3550");
+setNV.call(priceMix, "15000"); priceMix.dispatchEvent(new w.Event("input", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+[...w.document.querySelectorAll(".kl-typetab button")].find(b => b.textContent.includes("高速立替")).dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+const tollInput = [...w.document.querySelectorAll('input[inputmode="numeric"]')].find(i => i.placeholder === "例）2020");
+setNV.call(tollInput, "2020"); tollInput.dispatchEvent(new w.Event("input", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+console.log("--- 同時保存の案内表示?:", w.document.body.textContent.includes("も一緒に保存されます"));
+console.log("--- 合計が運搬+高速(¥32,020)?:", w.document.body.textContent.includes("32,020"));
+const saveMix = [...w.document.querySelectorAll("button")].find(b => b.textContent.includes("保存する"));
+console.log("--- 保存ボタンが2件表記?:", saveMix.textContent.includes("2件"));
+saveMix.dispatchEvent(new w.Event("click", { bubbles: true }));
+await new Promise(r => setTimeout(r, 400));
+const afterMix = JSON.parse(w.localStorage.getItem("kline4:records"));
+console.log("--- 運搬+高速で+2件保存?:", afterMix.length === beforeMix + 2);
+const mixToll = afterMix.find(r => r.type === "toll" && r.amount === 2020 && (r.client || "").includes("拓建材"));
+const mixNorm = afterMix.find(r => r.type === "normal" && r.amount === 30000 && (r.client || "").includes("拓建材"));
+console.log("--- 高速2,020円がtollで保存?:", !!mixToll, "/ 運搬30,000円がnormalで保存?:", !!mixNorm);
+console.log("--- 運搬とtollのIDが別?:", !!(mixToll && mixNorm && mixToll.id !== mixNorm.id));
+
+// 編集で開くと種別タブが固定されている（運搬⇄高速の変換＝上書き事故ができない）
+const tollCard = [...w.document.querySelectorAll(".kl-rec")].find(b => b.textContent.includes("高速立替") && b.textContent.includes("2,020"));
+if (tollCard) {
+  tollCard.dispatchEvent(new w.Event("click", { bubbles: true }));
+  await new Promise(r => setTimeout(r, 300));
+  const tabBtns = [...w.document.querySelectorAll(".kl-typetab button")];
+  console.log("--- 編集時タブ1個のみ?:", tabBtns.length === 1, "/ 種別固定ラベル表示?:", !!tabBtns[0] && tabBtns[0].textContent.includes("高速立替（非課税）の編集"));
+  w.document.querySelector(".kl-sheet-head .kl-iconbtn").dispatchEvent(new w.Event("click", { bubbles: true }));
+  await new Promise(r => setTimeout(r, 200));
+} else {
+  console.log("--- 編集タブ固定テスト: tollカード見つからずスキップ（要確認）");
+}
+
+// モーダルを閉じた後にbodyスクロールが開閉前の状態に戻っていること（v3.15スクロール修正）
+console.log("--- body overflow復元?:", w.document.body.style.overflow === preOverflowBody && w.document.documentElement.style.overflow === preOverflowHtml);
+
 // 従業員モードテスト: モードリセット→従業員選択
 w.localStorage.removeItem("kline4:mode");
 console.log("--- done");
