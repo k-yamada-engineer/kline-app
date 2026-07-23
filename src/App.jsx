@@ -291,6 +291,11 @@ export default function App() {
   const [lastSync, setLastSync] = usePersist("kline4:lastSync", 0);
   const [syncState, setSyncState] = useState(syncEnabled() ? "idle" : "off");
   const [lastSyncAt, setLastSyncAt] = useState(null);
+  /* マスタ（取引先・従業員・車両・単位・会社情報）の端末間同期。
+     日報レコードと同じテーブルに id="master:clients" 等の特別行として保存し、
+     編集時刻のlast-write-winsで全端末に伝播させる */
+  const [masterTs, setMasterTs] = usePersist("kline4:masterTs", {});
+  const [pendingMasters, setPendingMasters] = usePersist("kline4:pendingMasters", []);
 
   const [tab, setTab] = useState("home");
   const [month, setMonth] = useState(thisMonth());
@@ -329,41 +334,69 @@ export default function App() {
 
   /* ---- 同期本体 ---- */
   const doSync = async () => {
-    if (!syncEnabled()) return;
+    if (!syncEnabled()) return false;
     setSyncState("syncing");
     try {
       const recMap = new Map(records.map((r) => [r.id, r]));
+      const masterData = { clients, employees, vehicles, units, company };
       const rows = [
         ...pendingIds.filter((id) => recMap.has(id)).map((id) => {
           const r = recMap.get(id);
           return { id, payload: r, updated_at: r.updatedAt || r.createdAt || Date.now(), deleted: false };
         }),
         ...Object.entries(tombstones).map(([id, ts]) => ({ id, payload: null, updated_at: ts, deleted: true })),
+        ...pendingMasters.filter((k) => masterData[k] !== undefined).map((k) => ({
+          id: "master:" + k,
+          payload: { kind: k, data: masterData[k] },
+          updated_at: Number(masterTs[k]) || Date.now(),
+          deleted: false,
+        })),
       ];
       const pushed = await syncPush(rows);
-      if (pushed) { setPendingIds([]); setTombstones({}); }
+      if (pushed) { setPendingIds([]); setTombstones({}); setPendingMasters([]); }
       const remote = await syncPull(lastSync);
       if (remote) {
         if (remote.length > 0) {
-          setRecords((prev) => {
-            const map = new Map(prev.map((r) => [r.id, r]));
-            for (const row of remote) {
-              if (row.deleted) { map.delete(row.id); continue; }
-              const loc = map.get(row.id);
-              const locTs = loc ? (loc.updatedAt || loc.createdAt || 0) : -1;
-              if (Number(row.updated_at) > locTs && row.payload) map.set(row.id, row.payload);
-            }
-            return [...map.values()];
-          });
+          const isMasterRow = (r) => typeof r.id === "string" && r.id.startsWith("master:");
+          const recordRows = remote.filter((r) => !isMasterRow(r));
+          const masterRows = remote.filter(isMasterRow);
+          if (recordRows.length > 0) {
+            setRecords((prev) => {
+              const map = new Map(prev.map((r) => [r.id, r]));
+              for (const row of recordRows) {
+                if (row.deleted) { map.delete(row.id); continue; }
+                const loc = map.get(row.id);
+                const locTs = loc ? (loc.updatedAt || loc.createdAt || 0) : -1;
+                if (Number(row.updated_at) > locTs && row.payload) map.set(row.id, row.payload);
+              }
+              return [...map.values()];
+            });
+          }
+          for (const row of masterRows) {
+            const k = row.id.slice("master:".length);
+            const ts = Number(row.updated_at) || 0;
+            if (row.deleted || !row.payload || !row.payload.data) continue;
+            if (ts <= (Number(masterTs[k]) || 0)) continue;
+            const data = row.payload.data;
+            if (k === "clients") setClients(data);
+            else if (k === "employees") setEmployees(data);
+            else if (k === "vehicles") setVehicles(data);
+            else if (k === "units") setUnits(data);
+            else if (k === "company") setCompany(data);
+            else continue;
+            setMasterTs((t) => ({ ...t, [k]: ts }));
+          }
           setLastSync(Math.max(Number(lastSync) || 0, ...remote.map((r) => Number(r.updated_at) || 0)));
         }
         setSyncState(pushed ? "idle" : "error");
         setLastSyncAt(Date.now());
-      } else {
-        setSyncState("error");
+        return Boolean(pushed);
       }
+      setSyncState("error");
+      return false;
     } catch {
       setSyncState("error");
+      return false;
     }
   };
   const syncRef = useRef(null);
@@ -488,6 +521,27 @@ export default function App() {
   const openEdit = (r) => { setEditRec(r); setFormOpen(true); };
   const openNew = () => { setEditRec(null); setFormOpen(true); };
 
+  /* マスタ変更時は変更時刻を記録して同期キューに載せる（他端末に伝播させる） */
+  const wrapMasterSetter = (key, setter) => (v) => {
+    setter(v);
+    setMasterTs((t) => ({ ...t, [key]: Date.now() }));
+    setPendingMasters((p) => (p.includes(key) ? p : [...p, key]));
+    if (syncEnabled()) setTimeout(() => syncRef.current(), 300);
+  };
+  const setClientsSync = wrapMasterSetter("clients", setClients);
+  const setEmployeesSync = wrapMasterSetter("employees", setEmployees);
+  const setVehiclesSync = wrapMasterSetter("vehicles", setVehicles);
+  const setUnitsSync = wrapMasterSetter("units", setUnits);
+  const setCompanySync = wrapMasterSetter("company", setCompany);
+
+  /* 手動同期ボタン：結果を必ずトーストで返す（無反応に見えるのを防ぐ） */
+  const manualSync = async () => {
+    if (!syncEnabled()) { showToast("同期は未設定です"); return; }
+    showToast("同期中…");
+    const ok = await syncRef.current();
+    showToast(ok ? "同期しました ✓" : "⚠️ 同期に失敗しました（電波を確認してもう一度）");
+  };
+
   const tryAdmin = () => {
     const input = window.prompt("管理者PINを入力してください");
     if (input === null) return;
@@ -510,7 +564,7 @@ export default function App() {
     return (
       <div className="kl-root">
         <div className="app-ui">
-          <WorkerView name={mode.name} records={records} onAdd={openNew} onEdit={openEdit} onAdmin={tryAdmin} highlightId={highlightId} syncState={syncState} onSyncNow={() => syncRef.current()} />
+          <WorkerView name={mode.name} records={records} onAdd={openNew} onEdit={openEdit} onAdmin={tryAdmin} highlightId={highlightId} syncState={syncState} onSyncNow={manualSync} />
           {formOpen && (
             <RecordForm
               record={editRec} records={records}
@@ -542,15 +596,15 @@ export default function App() {
           )}
           {tab === "settings" && (
             <SettingsView
-              company={company} setCompany={setCompany}
-              clients={clients} setClients={setClients}
-              employees={employees} setEmployees={setEmployees}
-              vehicles={vehicles} setVehicles={setVehicles}
-              units={units} setUnits={setUnits}
+              company={company} setCompany={setCompanySync}
+              clients={clients} setClients={setClientsSync}
+              employees={employees} setEmployees={setEmployeesSync}
+              vehicles={vehicles} setVehicles={setVehiclesSync}
+              units={units} setUnits={setUnitsSync}
               records={records} setRecords={setRecords}
               pin={pin} setPin={setPin} setMode={setMode}
-              syncState={syncState} lastSyncAt={lastSyncAt} pendingCount={pendingIds.length + Object.keys(tombstones).length}
-              onSyncNow={() => syncRef.current()}
+              syncState={syncState} lastSyncAt={lastSyncAt} pendingCount={pendingIds.length + Object.keys(tombstones).length + pendingMasters.length}
+              onSyncNow={manualSync}
               showToast={showToast}
             />
           )}
