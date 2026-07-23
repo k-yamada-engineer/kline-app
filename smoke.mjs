@@ -214,6 +214,13 @@ setNativeVal.call(priceInputT, "5000");
 priceInputT.dispatchEvent(new w.Event("input", { bubbles: true }));
 await new Promise(r => setTimeout(r, 150));
 console.log("--- 単位t: 10×5000円=¥50,000(kgのような/1000変換なし)?:", w.document.body.textContent.includes("50,000"));
+// v3.16: 小数が出る掛け算は全単位で切り捨て（23.61×3260=76,968.6→76,968）
+setNativeVal.call(qtyInput, "23.61");
+qtyInput.dispatchEvent(new w.Event("input", { bubbles: true }));
+setNativeVal.call(priceInputT, "3260");
+priceInputT.dispatchEvent(new w.Event("input", { bubbles: true }));
+await new Promise(r => setTimeout(r, 150));
+console.log("--- 切り捨て: 23.61t×3260円=¥76,968?:", w.document.body.textContent.includes("76,968") && !w.document.body.textContent.includes("76,969"));
 // フォームを閉じる（保存せず破棄）
 const closeBtn2 = w.document.querySelector(".kl-sheet-head .kl-iconbtn");
 closeBtn2.dispatchEvent(new w.Event("click", { bubbles: true }));

@@ -96,10 +96,11 @@ const yen = (n) => "¥" + Math.round(Number(n) || 0).toLocaleString("ja-JP");
 const num = (n) => (Number(n) || 0).toLocaleString("ja-JP");
 /* 金額計算。㎏だけは現場の実務（実際の請求書と同じ）に合わせ「㎏入力 × トン単価 ÷ 1000」。
    その他の単位（t含む）は 数量 × 単価 をそのまま。表記は入力した単位のまま変えない。 */
+/* 金額計算：どの単位でも小数点以下は全部切り捨て（実請求書の慣行に合わせる） */
 const calcAmount = (qty, price, unit) => {
   const q = Number(qty) || 0, p = Number(price) || 0;
-  if (unit === "㎏") return Math.round((q * p) / 1000);
-  return Math.round(q * p);
+  if (unit === "㎏") return Math.floor((q * p) / 1000);
+  return Math.floor(q * p);
 };
 
 /* v3.11で誤ってt表記に変換されたレコードを、元の㎏表記に復元する（金額は不変）。
@@ -400,6 +401,33 @@ export default function App() {
     if (!localStorage.getItem("kline4:tUnitAdded")) {
       setUnits((prev) => (prev.includes("t") ? prev : [...prev.slice(0, 2), "t", ...prev.slice(2)]));
       localStorage.setItem("kline4:tUnitAdded", "1");
+    }
+    /* v3.16: 金額の丸めを四捨五入→切り捨てに変更したのに合わせ、
+       過去にアプリが四捨五入で計算したレコード（金額＝round(数量×単価)が成立）だけを
+       切り捨て額に補正する。金額を独自に持つレコード（実請求書由来のまとめ額・手動額）は
+       数式が成立しないので触らない。 */
+    if (!localStorage.getItem("kline4:floorApplied")) {
+      setRecords((prev) => {
+        const now = Date.now();
+        const changedIds = [];
+        const next = prev.map((r) => {
+          if (r.type === "toll") return r;
+          const q = Number(r.qty) || 0, p = Number(r.unitPrice) || 0;
+          if (q <= 0 || p <= 0) return r;
+          const raw = r.unit === "㎏" ? (q * p) / 1000 : q * p;
+          const rounded = Math.round(raw), floored = Math.floor(raw);
+          if (rounded === floored || r.amount !== rounded) return r;
+          changedIds.push(r.id);
+          return { ...r, amount: floored, updatedAt: now };
+        });
+        if (changedIds.length === 0) return prev;
+        if (syncEnabled()) {
+          setPendingIds((pd) => [...new Set([...pd, ...changedIds])]);
+          setTimeout(() => syncRef.current(), 800);
+        }
+        return next;
+      });
+      localStorage.setItem("kline4:floorApplied", "1");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
