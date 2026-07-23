@@ -24,3 +24,22 @@ drop policy if exists "kline_anon_update" on kline_records;
 create policy "kline_anon_update" on kline_records for update to anon using (true) with check (true);
 
 -- 物理deleteはanonに許可しない（削除はdeleted=trueのtombstone方式）
+
+-- ============================================================
+-- v3.18: 受領書写真のクラウド保存用バケット（Supabase SQL Editorに貼って実行）
+-- ============================================================
+insert into storage.buckets (id, name, public)
+values ('receipts', 'receipts', true)
+on conflict (id) do nothing;
+
+drop policy if exists "receipts_anon_select" on storage.objects;
+create policy "receipts_anon_select" on storage.objects
+  for select to anon using (bucket_id = 'receipts');
+
+drop policy if exists "receipts_anon_insert" on storage.objects;
+create policy "receipts_anon_insert" on storage.objects
+  for insert to anon with check (bucket_id = 'receipts');
+
+drop policy if exists "receipts_anon_update" on storage.objects;
+create policy "receipts_anon_update" on storage.objects
+  for update to anon using (bucket_id = 'receipts') with check (bucket_id = 'receipts');

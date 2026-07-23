@@ -257,6 +257,29 @@ async function syncPull(since) {
   return res.json();
 }
 
+/* ---------- 受領書写真のクラウド保存（Supabase Storage・無料枠1GB） ----------
+   保存時は従来どおり端末に即保存（オフラインでも動く）→裏で自動アップロード→
+   成功したら端末内のbase64をURLに置き換えて容量を解放する。過去の写真も順次移行。 */
+const PHOTO_BUCKET = "receipts";
+const photoPublicUrl = (recId) => `${SYNC_URL}/storage/v1/object/public/${PHOTO_BUCKET}/${recId}.jpg`;
+let photoUploadPausedUntil = 0; // バケット未作成・オフライン時の連打防止
+async function uploadPhotoToCloud(recId, dataUrl) {
+  if (!syncEnabled() || Date.now() < photoUploadPausedUntil) return null;
+  try {
+    const blob = await (await fetch(dataUrl)).blob();
+    const res = await fetch(`${SYNC_URL}/storage/v1/object/${PHOTO_BUCKET}/${recId}.jpg`, {
+      method: "POST",
+      headers: { apikey: SYNC_ANON_KEY, Authorization: `Bearer ${SYNC_ANON_KEY}`, "Content-Type": "image/jpeg", "x-upsert": "true" },
+      body: blob,
+    });
+    if (!res.ok) { photoUploadPausedUntil = Date.now() + 10 * 60 * 1000; return null; }
+    return `${photoPublicUrl(recId)}?v=${Date.now()}`;
+  } catch {
+    photoUploadPausedUntil = Date.now() + 5 * 60 * 1000;
+    return null;
+  }
+}
+
 /* ---------- 写真圧縮 ---------- */
 const compressImage = (file) => new Promise((resolve) => {
   const img = new Image();
@@ -401,6 +424,41 @@ export default function App() {
   };
   const syncRef = useRef(null);
   syncRef.current = doSync;
+  const recordsRef = useRef(records);
+  recordsRef.current = records;
+
+  /* 写真の自動クラウド移行: base64のまま端末に残っている写真を順次アップロードし、
+     成功したらURLに置き換えて端末容量を解放（他端末にも同期で伝播） */
+  useEffect(() => {
+    if (!syncEnabled()) return;
+    let stopped = false;
+    const tick = async () => {
+      if (stopped || document.hidden) return;
+      const targets = (recordsRef.current || [])
+        .filter((r) => typeof r.photo === "string" && r.photo.startsWith("data:"))
+        .slice(0, 2);
+      if (targets.length === 0) return;
+      const done = [];
+      for (const r of targets) {
+        const url = await uploadPhotoToCloud(r.id, r.photo);
+        if (!url) break;
+        done.push({ id: r.id, url });
+      }
+      if (done.length === 0 || stopped) return;
+      const now = Date.now();
+      setRecords((prev) => prev.map((r) => {
+        const hit = done.find((d) => d.id === r.id);
+        return hit && typeof r.photo === "string" && r.photo.startsWith("data:")
+          ? { ...r, photo: hit.url, updatedAt: now }
+          : r;
+      }));
+      setPendingIds((p) => [...new Set([...p, ...done.map((d) => d.id)])]);
+    };
+    const t = setInterval(tick, 45000);
+    const kick = setTimeout(tick, 4000);
+    return () => { stopped = true; clearInterval(t); clearTimeout(kick); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => {
     if (!syncEnabled()) return;
     syncRef.current();
