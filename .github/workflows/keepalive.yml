@@ -1,0 +1,18 @@
+# Supabase無料プランの自動pause（7日間無アクセス）防止のため、毎日1回RESTを叩く
+name: supabase-keepalive
+on:
+  schedule:
+    - cron: "17 21 * * *"   # 毎日 06:17 JST
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase REST
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://nhcgemajrsnyzkvjiyme.supabase.co/rest/v1/kline_records?select=id&limit=1" \
+            -H "apikey: sb_publishable_XDs36aBeJEVok0yTyWK3Kw_QIiKaKKW" \
+            -H "Authorization: Bearer sb_publishable_XDs36aBeJEVok0yTyWK3Kw_QIiKaKKW")
+          echo "HTTP $code"
+          test "$code" = "200"
