@@ -1334,6 +1334,17 @@ function paymentStatus(inv, paid) {
   return { kind: "over", text: `入金超過 +${yen(-diff)}` };
 }
 
+/* 請求書カード用：「2026/10/08 入金済み」形式（日付＝紐づいた入金の最新日） */
+function invoiceBadgeText(inv, paid, deps) {
+  if (!paid || !deps.length) return "未入金";
+  const last = deps.map((d) => d.txn_date || "").sort().pop().replaceAll("-", "/");
+  const diff = inv.total - paid;
+  if (diff === 0) return `${last} 入金済み`;
+  if (diff > 0 && diff <= FEE_TOL) return `${last} 入金済み（手数料差額 −${yen(diff)}）`;
+  if (diff > 0) return `${last} 一部入金（残り ${yen(diff)}）`;
+  return `${last} 入金済み（超過 +${yen(-diff)}）`;
+}
+
 function InvoiceListView({ records, clients, company, month, setMonth, onPreview }) {
   /* 口座タブでパスワード登録済みの端末なら、請求ごとの入金状況も表示する */
   const [bankKey] = usePersist("kline4:bankKey", "");
@@ -1404,7 +1415,7 @@ function InvoiceListView({ records, clients, company, month, setMonth, onPreview
                 <span>{fmtDay(from)}〜{fmtDay(to)}・{count}件{tollSum > 0 ? `・高速${yen(tollSum)}` : ""}</span>
                 {st && (
                   <span className={"kl-paybadge is-" + st.kind}>
-                    {st.text}{deps.length ? `・${deps.map((d) => fmtDay(d.txn_date)).join("、")} ${yen(paid)}` : ""}
+                    {invoiceBadgeText(inv, paid, deps)}
                   </span>
                 )}
               </div>

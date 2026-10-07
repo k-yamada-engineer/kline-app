@@ -442,7 +442,7 @@ console.log("--- body overflow復元?:", w.document.body.style.overflow === preO
   }
   await wait(300);
   const okCard = [...w.document.querySelectorAll(".kl-invcard")].find((b) => b.textContent.includes("オクノ"));
-  console.log("--- 請求書タブ: 6月オクノに『✓ 全額入金・7/25』?:", !!okCard && okCard.textContent.includes("全額入金") && okCard.textContent.includes("7/25"));
+  console.log("--- 請求書タブ: 6月オクノに『2026/07/25 入金済み』?:", !!okCard && okCard.textContent.includes("2026/07/25 入金済み"));
   const otherCard = [...w.document.querySelectorAll(".kl-invcard")].find((b) => !b.textContent.includes("オクノ") && !b.classList.contains("is-dim"));
   console.log("--- 請求書タブ: 紐づけのない請求は『未入金』?:", !!otherCard && otherCard.textContent.includes("未入金"));
   console.log("--- 請求書カードに請求額（税込＋高速）表示?:", !!okCard && okCard.textContent.includes("請求 ¥" + okunoTotal.toLocaleString()));
