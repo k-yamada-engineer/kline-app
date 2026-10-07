@@ -651,10 +651,10 @@ export default function App() {
             <RecordsView records={records} month={month} setMonth={setMonth} onEdit={openEdit} highlightId={highlightId} onAdd={openNew} />
           )}
           {tab === "invoice" && (
-            <InvoiceListView records={records} clients={clients} month={month} setMonth={setMonth} onPreview={(clientId, ym) => setInvoicePrev({ clientId, ym })} />
+            <InvoiceListView records={records} clients={clients} company={company} month={month} setMonth={setMonth} onPreview={(clientId, ym) => setInvoicePrev({ clientId, ym })} />
           )}
           {tab === "bank" && (
-            <BankView month={month} setMonth={setMonth} showToast={showToast} />
+            <BankView month={month} setMonth={setMonth} showToast={showToast} records={records} clients={clients} company={company} />
           )}
           {tab === "settings" && (
             <SettingsView
@@ -1300,7 +1300,52 @@ const csvEscape = (v) => {
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 };
 
-function InvoiceListView({ records, clients, month, setMonth, onPreview }) {
+/* ---------- 請求書と入金の紐づけ ---------- */
+/* 請求書1件の金額（請求書ドキュメントと同じ計算：税抜＋消費税(切り捨て)＋高速立替） */
+function invoiceOf(records, client, ym, taxRate) {
+  const { from, to } = closingPeriod(ym, client.closing);
+  let sub = 0, tollSum = 0, count = 0;
+  for (const r of records) {
+    if (r.client !== client.name || r.date < from || r.date > to) continue;
+    count++;
+    if (r.type === "toll") tollSum += Number(r.amount) || 0;
+    else sub += Number(r.amount) || 0;
+  }
+  const tax = Math.floor((sub * (Number(taxRate) || 0)) / 100);
+  return { ref: `${client.id}:${ym}`, client, ym, from, to, count, sub, tax, tollSum, total: sub + tax + tollSum };
+}
+const invRefOf = (clientId, ym) => `${clientId}:${ym}`;
+const FEE_TOL = 1000; // 振込手数料の先方差し引きとみなす差額の上限（円）
+/* 入金の名義と取引先名を比べるための正規化（半角カナ→全角・会社種別や記号を除去） */
+const normName = (s) => String(s || "").normalize("NFKC").toUpperCase()
+  .replace(/株式会社|有限会社|合同会社|カブシキガイシヤ|カブシキガイシャ|ユウゲンガイシヤ|ユウゲンガイシャ|フリコミ|振込/g, "")
+  .replace(/\((株|有|同|カ|ユ|ド)\)|[カユド]\)|\([カユド]/g, "")
+  .replace(/[\s・.,，。、\-－ー()（）「」]/g, "");
+const nameMatches = (normDesc, client) =>
+  [client.name, client.short].map(normName).filter((k) => k.length >= 2).some((k) => normDesc.includes(k));
+const invLabel = (inv) => `${inv.client.short || inv.client.name} ${Number(inv.ym.slice(5))}月分`;
+/* ある請求書に紐づいた入金の合計と状態 */
+function paymentStatus(inv, paid) {
+  if (!paid) return { kind: "none", text: "未入金" };
+  const diff = inv.total - paid;
+  if (diff === 0) return { kind: "paid", text: "✓ 全額入金" };
+  if (diff > 0 && diff <= FEE_TOL) return { kind: "paid", text: `✓ 入金済（差額 −${yen(diff)}・振込手数料か）` };
+  if (diff > 0) return { kind: "part", text: `一部入金（残り ${yen(diff)}）` };
+  return { kind: "over", text: `入金超過 +${yen(-diff)}` };
+}
+
+function InvoiceListView({ records, clients, company, month, setMonth, onPreview }) {
+  /* 口座タブでパスワード登録済みの端末なら、請求ごとの入金状況も表示する */
+  const [bankKey] = usePersist("kline4:bankKey", "");
+  const [links, setLinks] = useState(null);
+  useEffect(() => {
+    if (!bankKey) { setLinks(null); return; }
+    let alive = true;
+    bankFetch("links", bankKey).then((j) => { if (alive) setLinks(j.links || []); }).catch(() => { if (alive) setLinks(null); });
+    return () => { alive = false; };
+  }, [bankKey]);
+  const paidOf = (ref) => (links || []).filter((l) => l.invoice_ref === ref);
+
   const exportMonthCSV = () => {
     const monthRecs = records.filter((r) => monthOf(r.date) === month).sort((a, b) => a.date.localeCompare(b.date));
     if (monthRecs.length === 0) { window.alert(`${fmtMonth(month)}の記録がありません。`); return; }
@@ -1335,7 +1380,10 @@ function InvoiceListView({ records, clients, month, setMonth, onPreview }) {
   return (
     <div className="kl-page">
       <MonthNav month={month} setMonth={setMonth} title="請求書" />
-      <p className="kl-note">締め日（20日／末）に合わせて対象期間を自動集計します。タップでプレビュー → 印刷・PDF保存。</p>
+      <p className="kl-note">
+        締め日（20日／末）に合わせて対象期間を自動集計します。タップでプレビュー → 印刷・PDF保存。
+        {links ? "入金状況は「口座」タブで入金と紐づけた分を表示しています。" : ""}
+      </p>
 
       <button className="kl-csvbtn" onClick={exportMonthCSV}>
         <FileText size={16} /> {fmtMonth(month)}の月次データをCSVでエクスポート
@@ -1344,18 +1392,29 @@ function InvoiceListView({ records, clients, month, setMonth, onPreview }) {
       {active.length === 0 && <div className="kl-empty">{fmtMonth(month)}締めの対象記録がありません。<br />日報を記録すると自動で集計されます。</div>}
 
       <div className="kl-cards">
-        {active.map(({ c, count, sub, tollSum, from, to }) => (
-          <button key={c.id} className="kl-invcard" onClick={() => onPreview(c.id, month)}>
-            <div className="kl-invcard-l">
-              <b>{c.name}</b>
-              <span>{fmtDay(from)}〜{fmtDay(to)}・{count}件{tollSum > 0 ? `・高速${yen(tollSum)}` : ""}</span>
-            </div>
-            <div className="kl-invcard-r">
-              <b>{yen(sub)}</b>
-              <span>税抜</span>
-            </div>
-          </button>
-        ))}
+        {active.map(({ c, count, sub, tollSum, from, to }) => {
+          const inv = invoiceOf(records, c, month, company?.taxRate);
+          const deps = links ? paidOf(inv.ref) : [];
+          const paid = deps.reduce((s, d) => s + (Number(d.amount) || 0), 0);
+          const st = links ? paymentStatus(inv, paid) : null;
+          return (
+            <button key={c.id} className="kl-invcard" onClick={() => onPreview(c.id, month)}>
+              <div className="kl-invcard-l">
+                <b>{c.name}</b>
+                <span>{fmtDay(from)}〜{fmtDay(to)}・{count}件{tollSum > 0 ? `・高速${yen(tollSum)}` : ""}</span>
+                {st && (
+                  <span className={"kl-paybadge is-" + st.kind}>
+                    {st.text}{deps.length ? `・${deps.map((d) => fmtDay(d.txn_date)).join("、")} ${yen(paid)}` : ""}
+                  </span>
+                )}
+              </div>
+              <div className="kl-invcard-r">
+                <b>{yen(sub)}</b>
+                <span>税抜／請求 {yen(inv.total)}</span>
+              </div>
+            </button>
+          );
+        })}
       </div>
 
       {inactive.length > 0 && (
@@ -1518,7 +1577,7 @@ async function bankFetch(path, key, init = {}) {
   return j;
 }
 
-function BankView({ month, setMonth, showToast }) {
+function BankView({ month, setMonth, showToast, records, clients, company }) {
   const [key, setKey] = usePersist("kline4:bankKey", "");
   const [memory, setMemory] = usePersist("kline4:journalMemory", {}); // 相手先→前回の仕訳（候補表示用）
   const [data, setData] = useState(null);
@@ -1529,6 +1588,7 @@ function BankView({ month, setMonth, showToast }) {
   const [onlyUnset, setOnlyUnset] = useState(false);
   const [q, setQ] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [links, setLinks] = useState([]); // 請求書に紐づけ済みの入金（全期間）
   const reqSeq = useRef(0);
 
   const load = async () => {
@@ -1538,8 +1598,11 @@ function BankView({ month, setMonth, showToast }) {
     setErr("");
     const { from, to } = monthRange(month);
     try {
-      const j = await bankFetch(`ledger?from=${from}&to=${to}`, key);
-      if (seq === reqSeq.current) setData(j);
+      const [j, l] = await Promise.all([
+        bankFetch(`ledger?from=${from}&to=${to}`, key),
+        bankFetch("links", key).catch(() => ({ links: [] })),
+      ]);
+      if (seq === reqSeq.current) { setData(j); setLinks(l.links || []); }
     } catch (e) {
       if (seq !== reqSeq.current) return;
       if (e.code === 403) { setKey(""); setData(null); setErr("パスワードが違います。もう一度入力してください。"); }
@@ -1582,6 +1645,27 @@ function BankView({ month, setMonth, showToast }) {
     }
   };
 
+  /* 入金を請求書に紐づける（ref=null で解除）。仕訳が空なら「売掛金回収」を自動で入れる */
+  const link = async (id, ref) => {
+    const prev = data?.txns.find((t) => t.id === id);
+    if (!prev) return;
+    const patch = { invoice_ref: ref || "" };
+    if (ref && !prev.journal) patch.journal = "売掛金回収";
+    setData((d) => ({ ...d, txns: d.txns.map((t) => (t.id === id ? { ...t, invoice_ref: ref || null, journal: patch.journal ?? t.journal, _state: "saving" } : t)) }));
+    setLinks((ls) => {
+      const rest = ls.filter((x) => x.id !== id);
+      return ref ? [...rest, { id, txn_date: prev.txn_date, amount: prev.amount, description: prev.description, invoice_ref: ref }] : rest;
+    });
+    try {
+      const r = await bankFetch("annotate", key, { method: "POST", body: JSON.stringify({ id, ...patch }) });
+      setData((d) => ({ ...d, txns: d.txns.map((t) => (t.id === id ? { ...t, ...r.txn, _state: "saved" } : t)) }));
+      showToast(ref ? "請求書と紐づけました ✓" : "紐づけを外しました");
+    } catch (e) {
+      showToast(`⚠️ 紐づけできませんでした（${e.message}）`);
+      load();
+    }
+  };
+
   const accounts = data?.accounts ?? [];
   const txns = data?.txns ?? [];
   const inAcct = (t) => acct === "all" || String(t.walletable_id) === String(acct);
@@ -1594,10 +1678,72 @@ function BankView({ month, setMonth, showToast }) {
       (!qq || `${t.description || ""} ${t.journal || ""} ${t.memo || ""}`.toLowerCase().includes(qq)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [txns, acct, side, onlyUnset, q]);
-  const totals = useMemo(() => view.reduce((a, t) => {
-    if (t.entry_side === "income") a.inc += Number(t.amount) || 0; else a.out += Number(t.amount) || 0;
+  /* 合計は「口座の絞り込み」だけ反映（入金/出金・検索の絞り込みとは独立）。仕訳＝資金移動は口座間の移し替えなので除外 */
+  const isTransfer = (t) => (t.journal || "") === "資金移動";
+  const acctTxns = useMemo(() => txns.filter(inAcct),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [txns, acct]);
+  const totals = useMemo(() => acctTxns.reduce((a, t) => {
+    if (isTransfer(t)) return a;
+    const v = Number(t.amount) || 0;
+    if (t.entry_side === "income") { a.inc += v; a.incN++; } else { a.out += v; a.outN++; }
     return a;
-  }, { inc: 0, out: 0 }), [view]);
+  }, { inc: 0, out: 0, incN: 0, outN: 0 }), [acctTxns]);
+  /* 日ごとの入金・出金と、入金の月累計（その日までの合計） */
+  const daily = useMemo(() => {
+    const byDay = {};
+    for (const t of acctTxns) {
+      if (isTransfer(t)) continue;
+      const d = (byDay[t.txn_date] = byDay[t.txn_date] || { inc: 0, out: 0, cum: 0 });
+      if (t.entry_side === "income") d.inc += Number(t.amount) || 0; else d.out += Number(t.amount) || 0;
+    }
+    let cum = 0;
+    for (const day of Object.keys(byDay).sort()) { cum += byDay[day].inc; byDay[day].cum = cum; }
+    return byDay;
+  }, [acctTxns]);
+  const linkedThisMonth = acctTxns.filter((t) => t.entry_side === "income" && t.invoice_ref).length;
+
+  /* 請求書（表示月を含む直近7か月分）と入金済み額 */
+  const invoices = useMemo(() => {
+    const out = [];
+    for (let k = 0; k <= 6; k++) {
+      const ym = shiftMonth(month, -k);
+      for (const c of clients || []) {
+        const inv = invoiceOf(records || [], c, ym, company?.taxRate);
+        if (inv.count > 0 && inv.total > 0) out.push(inv);
+      }
+    }
+    return out;
+  }, [records, clients, company?.taxRate, month]);
+  const paidByRef = useMemo(() => {
+    const m = {};
+    for (const l of links) if (l.invoice_ref) m[l.invoice_ref] = (m[l.invoice_ref] || 0) + (Number(l.amount) || 0);
+    return m;
+  }, [links]);
+  const resolveInv = (ref) => {
+    const [cid, ym] = String(ref || "").split(":");
+    const c = (clients || []).find((x) => String(x.id) === cid);
+    return c && ym ? invoiceOf(records || [], c, ym, company?.taxRate) : null;
+  };
+  const openInvoices = invoices.filter((i) => (paidByRef[i.ref] || 0) < i.total - FEE_TOL);
+  /* 入金1件に対する請求書の候補（金額一致・振込手数料差し引き・名義一致で採点） */
+  const candidatesFor = (t) => {
+    if (t.entry_side !== "income" || t.invoice_ref) return [];
+    const d = normName(t.description);
+    const amt = Number(t.amount) || 0;
+    const out = [];
+    for (const inv of openInvoices) {
+      if (t.txn_date < inv.to) continue; // 締め日より前の入金は対象外
+      const diff = inv.total - (paidByRef[inv.ref] || 0) - amt;
+      const hit = nameMatches(d, inv.client);
+      let score = 0, why = "";
+      if (diff === 0) { score = hit ? 100 : 80; why = hit ? "名義・金額一致" : "金額一致"; }
+      else if (diff > 0 && diff <= FEE_TOL) { score = hit ? 70 : 40; why = `振込手数料 −${yen(diff)} の可能性`; }
+      else if (hit) { score = 30; why = diff > 0 ? `名義一致・一部入金（残り${yen(diff)}）` : `名義一致・金額差 +${yen(-diff)}`; }
+      if (score) out.push({ inv, score, why });
+    }
+    return out.sort((a, b) => b.score - a.score || b.inv.ym.localeCompare(a.inv.ym)).slice(0, 2);
+  };
   const groups = useMemo(() => {
     const g = new Map();
     for (const t of view) { if (!g.has(t.txn_date)) g.set(t.txn_date, []); g.get(t.txn_date).push(t); }
@@ -1613,7 +1759,6 @@ function BankView({ month, setMonth, showToast }) {
   };
   const lastSynced = accounts.reduce((mx, a) => (a.last_synced_at && a.last_synced_at > mx ? a.last_synced_at : mx), "");
   const totalBalance = accounts.reduce((s, a) => s + (Number(a.latest_balance) || 0), 0);
-  const net = totals.inc - totals.out;
 
   return (
     <div className="kl-page">
@@ -1637,12 +1782,15 @@ function BankView({ month, setMonth, showToast }) {
           </div>
 
           <div className="kl-statgrid">
-            <div className="kl-stat"><span>入金（{fmtMonth(month)}）</span><b className="kl-in">{yen(totals.inc)}</b></div>
-            <div className="kl-stat"><span>出金（{fmtMonth(month)}）</span><b className="kl-out">{yen(totals.out)}</b></div>
-            <div className="kl-stat kl-stat-wide" onClick={() => setOnlyUnset((v) => !v)} role="button">
-              <span>差引</span>
-              <b className={net >= 0 ? "kl-in" : "kl-out"}>{net >= 0 ? "+" : "−"}{yen(Math.abs(net))}</b>
-              <small>仕訳が未入力 <b className="kl-unset-count">{unsetCount}件</b>{unsetCount > 0 ? "（タップで絞り込み）" : ""}</small>
+            <div className="kl-stat kl-stat-wide kl-stat-in">
+              <span>入金 月累計（{fmtMonth(month)}）</span>
+              <b className="kl-in">{yen(totals.inc)}</b>
+              <small>{totals.incN}件{linkedThisMonth ? `・うち請求書と紐づけ済み ${linkedThisMonth}件` : ""}</small>
+            </div>
+            <div className="kl-stat kl-stat-wide">
+              <span>出金（{fmtMonth(month)}）</span>
+              <b className="kl-out">{yen(totals.out)}</b>
+              <small>{totals.outN}件・仕訳を「資金移動」にした明細は合計から除外</small>
             </div>
           </div>
 
@@ -1655,7 +1803,7 @@ function BankView({ month, setMonth, showToast }) {
             {[["all", "すべて"], ["income", "入金"], ["expense", "出金"]].map(([k, l]) => (
               <button key={k} className={"kl-chip kl-chip-s" + (side === k ? " is-on" : "")} onClick={() => setSide(k)}>{l}</button>
             ))}
-            <button className={"kl-chip kl-chip-s" + (onlyUnset ? " is-on" : "")} onClick={() => setOnlyUnset((v) => !v)}>仕訳が未入力のみ</button>
+            <button className={"kl-chip kl-chip-s" + (onlyUnset ? " is-on" : "")} onClick={() => setOnlyUnset((v) => !v)}>仕訳が未入力のみ（{unsetCount}）</button>
           </div>
           <input className="kl-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="摘要・仕訳・備考で検索" />
 
@@ -1664,15 +1812,26 @@ function BankView({ month, setMonth, showToast }) {
           {data && view.length === 0 && <div className="kl-empty">この条件の入出金はありません。</div>}
 
           {groups.map(([d, ts]) => {
-            const dayNet = ts.reduce((s, t) => s + (t.entry_side === "income" ? 1 : -1) * (Number(t.amount) || 0), 0);
+            const dd = daily[d] || { inc: 0, out: 0, cum: 0 };
             return (
               <section key={d}>
                 <div className="kl-day">
                   <span>{fmtDay(d)}</span>
-                  <span className={dayNet >= 0 ? "kl-in" : "kl-out"}>{dayNet >= 0 ? "+" : "−"}{yen(Math.abs(dayNet))}</span>
+                  <span className="kl-day-sums">
+                    {dd.inc > 0 && <span className="kl-in">入金 +{yen(dd.inc)}</span>}
+                    {dd.inc > 0 && <span className="kl-day-cum">月累計 {yen(dd.cum)}</span>}
+                    {dd.out > 0 && <span className="kl-out">出金 −{yen(dd.out)}</span>}
+                  </span>
                 </div>
                 <div className="kl-cards">
-                  {ts.map((t) => <BankTxnRow key={t.id} t={t} suggest={t.journal ? null : suggestFor(t)} onSave={save} />)}
+                  {ts.map((t) => (
+                    <BankTxnRow key={t.id} t={t} suggest={t.journal ? null : suggestFor(t)} onSave={save}
+                      linked={t.invoice_ref ? resolveInv(t.invoice_ref) : null}
+                      paidOfLinked={t.invoice_ref ? paidByRef[t.invoice_ref] || 0 : 0}
+                      candidates={candidatesFor(t)}
+                      invoiceOptions={t.entry_side === "income" && !t.invoice_ref ? openInvoices : []}
+                      onLink={link} />
+                  ))}
                 </div>
               </section>
             );
@@ -1693,7 +1852,7 @@ function BankView({ month, setMonth, showToast }) {
   );
 }
 
-function BankTxnRow({ t, suggest, onSave }) {
+function BankTxnRow({ t, suggest, onSave, linked, paidOfLinked, candidates = [], invoiceOptions = [], onLink }) {
   const [j, setJ] = useState(t.journal || "");
   const [m, setM] = useState(t.memo || "");
   useEffect(() => { setJ(t.journal || ""); }, [t.journal]);
@@ -1718,6 +1877,31 @@ function BankTxnRow({ t, suggest, onSave }) {
         <input value={m} onChange={(e) => setM(e.target.value)} onBlur={() => onSave(t.id, j, m)} onKeyDown={enterBlur}
           placeholder="備考" maxLength={500} aria-label="備考" />
       </div>
+      {inc && (t.invoice_ref || candidates.length > 0 || invoiceOptions.length > 0) && (
+        <div className="kl-btx-inv">
+          {t.invoice_ref ? (
+            <div className="kl-inv-linked">
+              <span>🧾 {linked ? `${invLabel(linked)}の請求 ${yen(linked.total)}` : `請求書 ${t.invoice_ref}`}</span>
+              {linked && <em className={"kl-paybadge is-" + paymentStatus(linked, paidOfLinked).kind}>{paymentStatus(linked, paidOfLinked).text}</em>}
+              <button onClick={() => onLink(t.id, null)}>外す</button>
+            </div>
+          ) : (
+            <>
+              {candidates.map((c) => (
+                <button key={c.inv.ref} className="kl-inv-cand" onClick={() => onLink(t.id, c.inv.ref)}>
+                  🧾 {invLabel(c.inv)}の請求 {yen(c.inv.total)}<small>{c.why}</small><b>紐づける</b>
+                </button>
+              ))}
+              {invoiceOptions.length > 0 && (
+                <select className="kl-inv-select" value="" onChange={(e) => e.target.value && onLink(t.id, e.target.value)} aria-label="請求書を選んで紐づけ">
+                  <option value="">🧾 請求書を選んで紐づける…</option>
+                  {invoiceOptions.map((i) => <option key={i.ref} value={i.ref}>{invLabel(i)}　{yen(i.total)}</option>)}
+                </select>
+              )}
+            </>
+          )}
+        </div>
+      )}
       <div className="kl-btx-foot">
         {!j && suggest && (
           <button className="kl-btx-suggest" onClick={() => { setJ(suggest); onSave(t.id, suggest, m); }}>候補: {suggest}</button>
@@ -2260,6 +2444,21 @@ button{ font-family:inherit; }
 .kl-btx-suggest{ border:1px dashed var(--accent); background:var(--accent-soft); color:var(--accent); border-radius:999px; padding:4px 10px; font-size:12px; font-weight:800; cursor:pointer; font-family:inherit; }
 .kl-btx-state{ color:var(--green); }
 .kl-btx-state.is-err{ color:var(--accent); }
+.kl-stat-in b{ font-size:26px; }
+.kl-day-sums{ display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.kl-day-cum{ color:var(--ink); background:#E8F3EC; border-radius:6px; padding:0 6px; }
+.kl-btx-inv{ margin-top:8px; display:flex; flex-direction:column; gap:6px; }
+.kl-inv-linked{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#EEF6F1; border:1px solid #CFE6D8; border-radius:10px; padding:7px 10px; font-size:12.5px; font-weight:800; color:var(--ink); }
+.kl-inv-linked em{ font-style:normal; }
+.kl-inv-linked button{ margin-left:auto; border:none; background:none; color:var(--muted); font-size:12px; font-weight:800; cursor:pointer; text-decoration:underline; font-family:inherit; }
+.kl-inv-cand{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; text-align:left; border:1.5px dashed var(--green); background:#F3FAF6; border-radius:10px; padding:7px 10px; font-size:12.5px; font-weight:800; color:var(--ink); cursor:pointer; font-family:inherit; }
+.kl-inv-cand small{ color:var(--green); font-size:11.5px; }
+.kl-inv-cand b{ margin-left:auto; background:var(--green); color:#fff; border-radius:999px; padding:3px 10px; font-size:12px; }
+.kl-inv-select{ width:100%; min-height:38px; border:1.5px solid var(--line); border-radius:10px; padding:0 8px; font-size:14px; background:var(--card); color:var(--ink2); font-family:inherit; font-weight:700; }
+.kl-paybadge{ display:inline-block; font-size:11.5px; font-weight:800; border-radius:6px; padding:1px 7px; margin-top:4px; }
+.kl-paybadge.is-paid{ background:#E3F2E8; color:var(--green); }
+.kl-paybadge.is-part, .kl-paybadge.is-over{ background:#FFF4D6; color:#9A6A00; }
+.kl-paybadge.is-none{ background:var(--bg); color:var(--muted); }
 
 /* link button */
 .kl-linkbtn{ width:100%; margin-top:22px; min-height:50px; border:1.5px solid var(--line); background:var(--card); border-radius:13px; font-size:15px; font-weight:800; color:var(--ink); display:flex; align-items:center; justify-content:center; gap:7px; cursor:pointer; box-shadow:var(--shadow); }

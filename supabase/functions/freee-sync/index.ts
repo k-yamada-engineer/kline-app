@@ -44,13 +44,17 @@ export interface TxnRow {
   synced_at: string;
   // ※ journal / memo（アプリで入力する仕訳・備考）はここに含めない＝自動取り込みで上書きされない
 }
+/** 注釈は部分更新。送った項目だけを書き換える（請求書の紐づけで仕訳・備考を消さないため） */
 export interface Annotation {
-  journal: string | null;
-  memo: string | null;
+  journal?: string | null;
+  memo?: string | null;
+  invoice_ref?: string | null; // 請求書の紐づけ（"取引先ID:YYYY-MM"）
 }
 /** アプリ表示用の明細（raw等の重い列は返さない） */
 export const LEDGER_COLS =
-  "id,txn_date,amount,entry_side,walletable_id,walletable_type,walletable_name,description,balance,freee_status,journal,memo,annotated_at";
+  "id,txn_date,amount,entry_side,walletable_id,walletable_type,walletable_name,description,balance,freee_status,journal,memo,invoice_ref,annotated_at";
+/** 請求書の入金状況表示用（紐づけ済み入金） */
+export const LINKED_COLS = "id,txn_date,amount,entry_side,description,walletable_name,invoice_ref";
 export interface Store {
   loadTokens(): Promise<TokenRow | null>;
   /** prevRefresh があれば「その refresh_token の行だけ更新」(競合防止)。null なら新規/上書き保存 */
@@ -61,6 +65,8 @@ export interface Store {
   listTxns(from: string, to: string): Promise<any[]>;
   listAccounts(): Promise<any[]>;
   annotate(id: number, a: Annotation): Promise<any | null>;
+  /** 請求書に紐づけ済みの入金（全期間） */
+  listLinked(): Promise<any[]>;
 }
 export interface Env {
   get(k: string): string | undefined;
@@ -286,10 +292,16 @@ export function adminStore(db: any): Store {
     },
     async annotate(id, a) {
       const { data, error } = await db.from("bank_txns")
-        .update({ journal: a.journal, memo: a.memo, annotated_at: new Date().toISOString() })
-        .eq("id", id).select("id,journal,memo,annotated_at");
+        .update({ ...a, annotated_at: new Date().toISOString() })
+        .eq("id", id).select("id,journal,memo,invoice_ref,annotated_at");
       if (error) fail("annotate", error);
       return data?.[0] ?? null;
+    },
+    async listLinked() {
+      const { data, error } = await db.from("bank_txns").select(LINKED_COLS).not("invoice_ref", "is", null)
+        .order("txn_date", { ascending: false }).limit(1000);
+      if (error) fail("listLinked", error);
+      return data ?? [];
     },
   };
 }
@@ -363,13 +375,20 @@ export function restStore(url: string, key: string, f: Fetch = fetch): Store {
     },
     async annotate(id, a) {
       const res = await must(
-        await f(`${base}/bank_txns?id=eq.${id}&select=id,journal,memo,annotated_at`, {
+        await f(`${base}/bank_txns?id=eq.${id}&select=id,journal,memo,invoice_ref,annotated_at`, {
           method: "PATCH", headers: { ...h, Prefer: "return=representation" },
-          body: JSON.stringify({ journal: a.journal, memo: a.memo, annotated_at: new Date().toISOString() }),
+          body: JSON.stringify({ ...a, annotated_at: new Date().toISOString() }),
         }),
         "annotate",
       );
       return (await res.json())[0] ?? null;
+    },
+    async listLinked() {
+      const res = await must(
+        await f(`${base}/bank_txns?select=${LINKED_COLS}&invoice_ref=not.is.null&order=txn_date.desc&limit=1000`, { headers: h }),
+        "listLinked",
+      );
+      return res.json();
     },
   };
 }
@@ -385,7 +404,7 @@ export function pickStore(ctx: any, env: Env): Store {
   const broken = async () => { throw new HttpError(500, "DBの管理者キーが取得できません（SUPABASE_SECRET_KEYS / SUPABASE_SERVICE_ROLE_KEY）"); };
   return {
     loadTokens: broken, saveTokens: broken, upsertTxns: broken, latestTxnDate: broken, stats: broken,
-    listTxns: broken, listAccounts: broken, annotate: broken,
+    listTxns: broken, listAccounts: broken, annotate: broken, listLinked: broken,
   } as unknown as Store;
 }
 
@@ -451,7 +470,7 @@ export function makeHandler(env: Env, store: Store, f: Fetch) {
       }
 
       /* ---- ここから下はアプリ（管理者画面）用。x-app-key 必須 ---- */
-      if (route === "ledger" || route === "annotate" || route === "refresh") {
+      if (route === "ledger" || route === "annotate" || route === "refresh" || route === "links") {
         if (!(await appAuthed(req))) return json({ ok: false, error: "forbidden" }, 403);
       }
       if (route === "ledger") {
@@ -471,9 +490,22 @@ export function makeHandler(env: Env, store: Store, f: Fetch) {
           if (s.length > max) throw new HttpError(400, `${max}文字以内で入力してください`);
           return s === "" ? null : s;
         };
-        const saved = await store.annotate(id, { journal: clean(b?.journal, 60), memo: clean(b?.memo, 500) });
+        // 送られてきた項目だけ更新する（例：請求書の紐づけだけ送っても、仕訳・備考は消えない）
+        const patch: Annotation = {};
+        if (b && "journal" in b) patch.journal = clean(b.journal, 60);
+        if (b && "memo" in b) patch.memo = clean(b.memo, 500);
+        if (b && "invoice_ref" in b) {
+          const ref = clean(b.invoice_ref, 60);
+          if (ref !== null && !/^[\w-]+:\d{4}-\d{2}$/.test(ref)) return json({ ok: false, error: "invoice_ref の形式が不正です" }, 400);
+          patch.invoice_ref = ref;
+        }
+        if (Object.keys(patch).length === 0) return json({ ok: false, error: "更新する項目がありません" }, 400);
+        const saved = await store.annotate(id, patch);
         if (!saved) return json({ ok: false, error: "明細が見つかりません" }, 404);
         return json({ ok: true, txn: saved });
+      }
+      if (route === "links") {
+        return json({ ok: true, links: await store.listLinked() });
       }
       if (route === "refresh") {
         if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);

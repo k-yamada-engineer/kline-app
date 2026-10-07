@@ -19,3 +19,7 @@ select distinct on (b.walletable_id)
 from bank_txns b
 order by b.walletable_id, b.txn_date desc, b.id desc;
 revoke all on bank_accounts_summary from anon, authenticated;
+
+-- v3: 請求書との紐づけ（"取引先ID:YYYY-MM"）。アプリの口座タブで設定
+alter table bank_txns add column if not exists invoice_ref text;
+create index if not exists bank_txns_invoice_ref_idx on bank_txns (invoice_ref) where invoice_ref is not null;

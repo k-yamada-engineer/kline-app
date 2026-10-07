@@ -319,91 +319,136 @@ if (tollCard) {
 // モーダルを閉じた後にbodyスクロールが開閉前の状態に戻っていること（v3.15スクロール修正）
 console.log("--- body overflow復元?:", w.document.body.style.overflow === preOverflowBody && w.document.documentElement.style.overflow === preOverflowHtml);
 
-// --- v3.19: 口座タブ（freee連携の入出金・仕訳/備考） ---
+// --- v3.19-20: 口座タブ（freee連携の入出金・仕訳/備考・月累計・請求書の紐づけ） ---
 {
   const sv = Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, "value").set;
+  const svSel = Object.getOwnPropertyDescriptor(w.HTMLSelectElement.prototype, "value").set;
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // テスト用の「6月分オクノの請求額」をアプリと同じ式で計算（締め日に応じた期間・税10%切り捨て・高速立替込み）
+  const lsClients = JSON.parse(w.localStorage.getItem("kline4:clients"));
+  const lsRecords = JSON.parse(w.localStorage.getItem("kline4:records"));
+  const okuno = lsClients.find((c) => c.name.includes("オクノ"));
+  const ym = "2026-06";
+  const d = parseInt(okuno.closing, 10);
+  const period = (okuno.closing !== "末" && d >= 1 && d <= 28)
+    ? { from: `2026-05-${String(d + 1).padStart(2, "0")}`, to: `2026-06-${String(d).padStart(2, "0")}` }
+    : { from: "2026-06-01", to: "2026-06-30" };
+  let sub = 0, toll = 0;
+  for (const r of lsRecords) if (r.client === okuno.name && r.date >= period.from && r.date <= period.to) { if (r.type === "toll") toll += Number(r.amount) || 0; else sub += Number(r.amount) || 0; }
+  const okunoTotal = sub + Math.floor(sub * 10 / 100) + toll;
+  const okunoRef = `${okuno.id}:${ym}`;
+
   const bankCalls = [];
-  const ledger = {
-    ok: true, from: "2026-10-01", to: "2026-10-31",
-    accounts: [{ walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", walletable_type: "bank_account", latest_balance: 3456789, latest_date: "2026-10-07", txn_count: 201, last_synced_at: "2026-10-07T11:05:00Z" }],
-    txns: [
-      { id: 901, txn_date: "2026-10-07", amount: 1122000, entry_side: "income", walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", description: "ﾌﾘｺﾐ ｵｸﾉﾅﾏｺﾝ", balance: 3456789, journal: null, memo: null },
-      { id: 902, txn_date: "2026-10-06", amount: 33000, entry_side: "expense", walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", description: "ENEOS 高槻 1006", balance: 2334789, journal: null, memo: null },
-      { id: 903, txn_date: "2026-10-03", amount: 21000, entry_side: "expense", walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", description: "ENEOS 高槻 1003", balance: 2367789, journal: null, memo: null },
-    ],
-  };
+  const serverRefs = {}; // 紐づけ状態（サーバーを模擬）
+  const ledgerTxns = [
+    { id: 900, txn_date: "2026-07-25", amount: okunoTotal, entry_side: "income", walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", description: "ﾌﾘｺﾐ ｶ)ｵｸﾉﾅﾏｺﾝ", balance: 9000000, journal: null, memo: null, invoice_ref: null },
+    { id: 901, txn_date: "2026-07-10", amount: 1122000, entry_side: "income", walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", description: "ﾌﾘｺﾐ ﾃｽﾄｼｮｳｼﾞ", balance: 3456789, journal: null, memo: null, invoice_ref: null },
+    { id: 902, txn_date: "2026-07-06", amount: 33000, entry_side: "expense", walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", description: "ENEOS 高槻 1006", balance: 2334789, journal: null, memo: null, invoice_ref: null },
+    { id: 903, txn_date: "2026-07-03", amount: 21000, entry_side: "expense", walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", description: "ENEOS 高槻 1003", balance: 2367789, journal: null, memo: null, invoice_ref: null },
+    { id: 904, txn_date: "2026-07-02", amount: 500000, entry_side: "income", walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", description: "ﾐﾅﾄｷﾞﾝｺｳ ｶﾗ", balance: 2388789, journal: "資金移動", memo: null, invoice_ref: null },
+  ];
+  const ledger = () => ({
+    ok: true, from: "2026-07-01", to: "2026-07-31",
+    accounts: [{ walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", walletable_type: "bank_account", latest_balance: 3456789, latest_date: "2026-07-25", txn_count: 201, last_synced_at: "2026-07-14T02:05:00Z" }],
+    txns: ledgerTxns.map((t) => ({ ...t, invoice_ref: serverRefs[t.id] ?? t.invoice_ref })),
+  });
   const origFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     const u = String(url);
     if (u.includes("/functions/v1/freee-sync/")) {
       bankCalls.push({ u, init });
-      const key = init.headers?.["x-app-key"];
-      if (key !== "goodkey1234abcd0") return new Response(JSON.stringify({ ok: false, error: "forbidden" }), { status: 403 });
-      if (u.includes("/ledger")) return new Response(JSON.stringify(ledger), { status: 200 });
-      if (u.includes("/annotate")) { const b = JSON.parse(init.body); return new Response(JSON.stringify({ ok: true, txn: { id: b.id, journal: b.journal || null, memo: b.memo || null, annotated_at: "x" } }), { status: 200 }); }
+      if (init.headers?.["x-app-key"] !== "goodkey1234abcd0") return new Response(JSON.stringify({ ok: false, error: "forbidden" }), { status: 403 });
+      if (u.includes("/ledger")) return new Response(JSON.stringify(ledger()), { status: 200 });
+      if (u.includes("/links")) return new Response(JSON.stringify({ ok: true, links: ledgerTxns.filter((t) => serverRefs[t.id]).map((t) => ({ ...t, invoice_ref: serverRefs[t.id] })) }), { status: 200 });
+      if (u.includes("/annotate")) {
+        const b = JSON.parse(init.body);
+        if ("invoice_ref" in b) { if (b.invoice_ref) serverRefs[b.id] = b.invoice_ref; else delete serverRefs[b.id]; }
+        return new Response(JSON.stringify({ ok: true, txn: { id: b.id, ...("journal" in b ? { journal: b.journal || null } : {}), ...("memo" in b ? { memo: b.memo || null } : {}), ...("invoice_ref" in b ? { invoice_ref: b.invoice_ref || null } : {}) } }), { status: 200 });
+      }
       if (u.includes("/refresh")) return new Response(JSON.stringify({ ok: true, fetched: 98 }), { status: 200 });
     }
-    return new Response("[]", { status: 200 }); // 日報同期など他の通信は空で返す
+    return new Response("[]", { status: 200 });
   };
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  [...w.document.querySelectorAll(".kl-navbtn")].find((b) => b.textContent.includes("口座")).dispatchEvent(new w.Event("click", { bubbles: true }));
-  await wait(300);
-  console.log("--- 口座タブ: ナビに口座ボタン・パスワード入力画面?:", w.document.body.textContent.includes("口座データの表示パスワード"));
+  const nav = (label) => [...w.document.querySelectorAll(".kl-navbtn")].find((b) => b.textContent.includes(label)).dispatchEvent(new w.Event("click", { bubbles: true }));
+  const btn = (text) => [...w.document.querySelectorAll("button")].find((b) => b.textContent.includes(text));
+  // 表示月を2026年7月に合わせる（前のテストで6月に移動しているため）
+  nav("口座"); await wait(300);
+  for (let i = 0; i < 6 && !w.document.querySelector(".kl-monthnav b").textContent.includes("2026年7月"); i++) {
+    const cur = w.document.querySelector(".kl-monthnav b").textContent;
+    w.document.querySelector(`.kl-monthnav button[aria-label="${cur < "2026年7月" ? "翌月" : "前月"}"]`).dispatchEvent(new w.Event("click", { bubbles: true }));
+    await wait(120);
+  }
+  console.log("--- 口座タブ: パスワード入力画面?:", w.document.body.textContent.includes("口座データの表示パスワード"));
   const fab = w.document.querySelector(".kl-fab"); const sides = w.document.querySelectorAll(".kl-nav-side");
   console.log("--- ナビ: 左右グループ2つで＋ボタンが中央?:", sides.length === 2 && fab.previousElementSibling === sides[0] && fab.nextElementSibling === sides[1]);
-
-  // 間違ったパスワード→エラー表示・記憶しない
   let pw = w.document.querySelector('.kl-setcard input[type="password"]');
   sv.call(pw, "wrongwrongwrong1"); pw.dispatchEvent(new w.Event("input", { bubbles: true }));
-  [...w.document.querySelectorAll("button")].find((b) => b.textContent.includes("口座を表示する")).dispatchEvent(new w.Event("click", { bubbles: true }));
-  await wait(300);
+  btn("口座を表示する").dispatchEvent(new w.Event("click", { bubbles: true })); await wait(300);
   console.log("--- 誤パスワード: エラー表示＆端末に記憶しない?:", w.document.body.textContent.includes("パスワードが違います") && !JSON.parse(w.localStorage.getItem("kline4:bankKey") || '""'));
-
-  // 正しいパスワード
   pw = w.document.querySelector('.kl-setcard input[type="password"]');
   sv.call(pw, "goodkey1234abcd0"); pw.dispatchEvent(new w.Event("input", { bubbles: true }));
-  [...w.document.querySelectorAll("button")].find((b) => b.textContent.includes("口座を表示する")).dispatchEvent(new w.Event("click", { bubbles: true }));
-  await wait(400);
-  const tx = w.document.body.textContent;
+  btn("口座を表示する").dispatchEvent(new w.Event("click", { bubbles: true })); await wait(400);
+  let tx = w.document.body.textContent;
   console.log("--- 正パスワード: 端末に記憶?:", JSON.parse(w.localStorage.getItem("kline4:bankKey")) === "goodkey1234abcd0");
   console.log("--- 口座カード(銀行名・残高¥3,456,789)?:", tx.includes("GMOあおぞらネット銀行") && tx.includes("3,456,789"));
-  console.log("--- 明細3件表示・入金+¥1,122,000/出金−¥33,000?:", w.document.querySelectorAll(".kl-btx").length === 3 && tx.includes("+¥1,122,000") && tx.includes("−¥33,000"));
-  console.log("--- 入金合計¥1,122,000・出金合計¥54,000・未入力3件?:", tx.includes("1,122,000") && tx.includes("54,000") && tx.includes("3件"));
-  const ledgerCall = bankCalls.find((c) => c.u.includes("/ledger") && c.init.headers["x-app-key"] === "goodkey1234abcd0");
-  console.log("--- ledgerは月初〜月末で要求?:", !!ledgerCall && /from=\d{4}-\d{2}-01&to=\d{4}-\d{2}-(28|29|30|31)/.test(ledgerCall.u));
+  console.log("--- 明細5件表示?:", w.document.querySelectorAll(".kl-btx").length === 5);
+  console.log("--- 差引カードは廃止?:", !tx.includes("差引"));
+  const incTotal = okunoTotal + 1122000; // 資金移動の50万は除外
+  console.log("--- 入金 月累計＝¥" + incTotal.toLocaleString() + "（資金移動を除外・2件）?:", tx.includes("入金 月累計") && tx.includes(incTotal.toLocaleString()) && tx.includes("2件"));
+  console.log("--- 出金¥54,000?:", tx.includes("54,000"));
+  const dayHeads = [...w.document.querySelectorAll(".kl-day")].map((e) => e.textContent);
+  console.log("--- 日付ヘッダーに月累計（7/10時点¥1,122,000・7/25時点¥" + incTotal.toLocaleString() + "）?:",
+    dayHeads.some((h) => h.includes("月累計 ¥1,122,000")) && dayHeads.some((h) => h.includes("月累計 ¥" + incTotal.toLocaleString())));
+  console.log("--- 未入力件数はチップに表示（4件＝資金移動以外）?:", btn("仕訳が未入力のみ").textContent.includes("（4）"));
 
-  // ENEOS(1006)に仕訳「燃料費」＋備考を入力→離脱で保存
+  // 請求書との紐づけ：オクノ入金に「名義・金額一致」の候補
+  const okRow = () => [...w.document.querySelectorAll(".kl-btx")].find((r) => r.textContent.includes("ｵｸﾉﾅﾏｺﾝ") || r.textContent.includes("オクノナマコン"));
+  const cand = okRow().querySelector(".kl-inv-cand");
+  console.log("--- 半角カナ名義の入金に『オクノ 6月分・名義・金額一致』の候補?:", !!cand && cand.textContent.includes("6月分") && cand.textContent.includes("名義・金額一致"), "| 請求額:", okunoTotal.toLocaleString());
+  const testRow = [...w.document.querySelectorAll(".kl-btx")].find((r) => r.textContent.includes("ﾃｽﾄｼｮｳｼﾞ"));
+  console.log("--- 無関係な入金には候補なし・手動選択は出る?:", !testRow.querySelector(".kl-inv-cand") && !!testRow.querySelector(".kl-inv-select"));
+  const outRow = [...w.document.querySelectorAll(".kl-btx")].find((r) => r.textContent.includes("ENEOS 高槻 1006"));
+  console.log("--- 出金行には請求書欄なし?:", !outRow.querySelector(".kl-btx-inv"));
+  cand.dispatchEvent(new w.Event("click", { bubbles: true })); await wait(300);
+  const linkCall = bankCalls.filter((c) => c.u.includes("/annotate")).pop();
+  const lb = linkCall ? JSON.parse(linkCall.init.body) : {};
+  console.log("--- 紐づけ: POST {id:900, invoice_ref, 仕訳=売掛金回収（空欄だったので自動）}?:", lb.id === 900 && lb.invoice_ref === okunoRef && lb.journal === "売掛金回収");
+  console.log("--- 紐づけ後『オクノ 6月分の請求・✓ 全額入金』表示?:", okRow().textContent.includes("6月分の請求") && okRow().textContent.includes("全額入金"));
+
+  // 手動で仕訳・備考を入れても紐づけは消えない（部分更新）
+  const [jIn, mIn] = okRow().querySelectorAll("input");
+  sv.call(mIn, "6月分入金"); mIn.dispatchEvent(new w.Event("input", { bubbles: true }));
+  mIn.dispatchEvent(new w.FocusEvent("focusout", { bubbles: true })); await wait(300);
+  const memoCall = bankCalls.filter((c) => c.u.includes("/annotate")).pop();
+  const mb = JSON.parse(memoCall.init.body);
+  console.log("--- 備考保存は invoice_ref を送らない（紐づけを壊さない）?:", mb.memo === "6月分入金" && !("invoice_ref" in mb) && okRow().textContent.includes("全額入金"));
+
+  // ENEOSの仕訳→同じ相手先に候補
   const row = [...w.document.querySelectorAll(".kl-btx")].find((r) => r.textContent.includes("ENEOS 高槻 1006"));
-  const [jIn, mIn] = row.querySelectorAll("input");
-  console.log("--- 出金行の仕訳候補リストは出金用?:", jIn.getAttribute("list") === "kl-journal-out" && !!w.document.querySelector('#kl-journal-out option[value="燃料費"]'));
-  sv.call(jIn, "燃料費"); jIn.dispatchEvent(new w.Event("input", { bubbles: true }));
-  sv.call(mIn, "ダンプ9003 給油"); mIn.dispatchEvent(new w.Event("input", { bubbles: true }));
-  mIn.dispatchEvent(new w.FocusEvent("focusout", { bubbles: true }));
-  await wait(300);
-  const ann = bankCalls.filter((c) => c.u.includes("/annotate"));
-  const body = ann.length ? JSON.parse(ann[ann.length - 1].init.body) : {};
-  console.log("--- 保存: POST /annotate {id:902, 燃料費, 備考}?:", ann.length >= 1 && ann[ann.length - 1].init.method === "POST" && body.id === 902 && body.journal === "燃料費" && body.memo === "ダンプ9003 給油");
-  console.log("--- 保存後に✓表示・未入力が2件に減る?:", w.document.body.textContent.includes("✓ 保存しました") && w.document.body.textContent.includes("2件"));
-  // 同じ相手先(ENEOS 高槻 1003)に「候補: 燃料費」が出る（数字違いは同一視）
+  const [eJ] = row.querySelectorAll("input");
+  sv.call(eJ, "燃料費"); eJ.dispatchEvent(new w.Event("input", { bubbles: true }));
+  eJ.dispatchEvent(new w.FocusEvent("focusout", { bubbles: true })); await wait(300);
   const row3 = [...w.document.querySelectorAll(".kl-btx")].find((r) => r.textContent.includes("ENEOS 高槻 1003"));
-  console.log("--- 同じ相手先に『候補: 燃料費』?:", !!row3 && row3.textContent.includes("候補: 燃料費"));
-  // 値が変わっていなければ再送しない
-  const before = bankCalls.filter((c) => c.u.includes("/annotate")).length;
-  jIn.dispatchEvent(new w.FocusEvent("focusout", { bubbles: true }));
-  await wait(200);
-  console.log("--- 変更なしの離脱では再送しない?:", bankCalls.filter((c) => c.u.includes("/annotate")).length === before);
-  // 絞り込み: 未入力のみ
-  [...w.document.querySelectorAll(".kl-chip")].find((b) => b.textContent.includes("仕訳が未入力のみ")).dispatchEvent(new w.Event("click", { bubbles: true }));
-  await wait(150);
-  console.log("--- 未入力のみ絞り込みで2件?:", w.document.querySelectorAll(".kl-btx").length === 2);
+  console.log("--- 仕訳保存→同じ相手先(数字違い)に『候補: 燃料費』?:", row3.textContent.includes("候補: 燃料費"));
+
   // 今すぐ更新
-  [...w.document.querySelectorAll("button")].find((b) => b.textContent.includes("今すぐ更新")).dispatchEvent(new w.Event("click", { bubbles: true }));
-  await wait(400);
+  btn("今すぐ更新").dispatchEvent(new w.Event("click", { bubbles: true })); await wait(400);
   console.log("--- 今すぐ更新: POST /refresh→トースト?:", bankCalls.some((c) => c.u.includes("/refresh") && c.init.method === "POST") && w.document.body.textContent.includes("freeeから更新しました"));
+
+  // 請求書タブ：6月のオクノに入金状況
+  nav("請求書"); await wait(300);
+  for (let i = 0; i < 3 && !w.document.querySelector(".kl-monthnav b").textContent.includes("2026年6月"); i++) {
+    w.document.querySelector('.kl-monthnav button[aria-label="前月"]').dispatchEvent(new w.Event("click", { bubbles: true })); await wait(150);
+  }
+  await wait(300);
+  const okCard = [...w.document.querySelectorAll(".kl-invcard")].find((b) => b.textContent.includes("オクノ"));
+  console.log("--- 請求書タブ: 6月オクノに『✓ 全額入金・7/25』?:", !!okCard && okCard.textContent.includes("全額入金") && okCard.textContent.includes("7/25"));
+  const otherCard = [...w.document.querySelectorAll(".kl-invcard")].find((b) => !b.textContent.includes("オクノ") && !b.classList.contains("is-dim"));
+  console.log("--- 請求書タブ: 紐づけのない請求は『未入金』?:", !!otherCard && otherCard.textContent.includes("未入金"));
+  console.log("--- 請求書カードに請求額（税込＋高速）表示?:", !!okCard && okCard.textContent.includes("請求 ¥" + okunoTotal.toLocaleString()));
+
   globalThis.fetch = origFetch;
-  // 後続テストのためホームへ戻す
-  [...w.document.querySelectorAll(".kl-navbtn")].find((b) => b.textContent.includes("ホーム")).dispatchEvent(new w.Event("click", { bubbles: true }));
-  await wait(200);
+  nav("ホーム"); await wait(200);
 }
 
 // 従業員モードテスト: モードリセット→従業員選択

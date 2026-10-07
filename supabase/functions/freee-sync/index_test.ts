@@ -34,6 +34,7 @@ function memStore(initial: any = null) {
       txns.set(id, { ...r, ...a, annotated_at: "now" });
       return { id, ...a };
     },
+    listLinked: async () => [...txns.values()].filter((r) => r.invoice_ref),
   };
 }
 
@@ -201,7 +202,7 @@ function fakeDb(result: any) {
     from(table: string) {
       const rec = { table, ops: [] as any[] };
       const b: any = {};
-      for (const op of ["select", "update", "upsert", "eq", "gte", "lte", "order", "limit"]) {
+      for (const op of ["select", "update", "upsert", "eq", "gte", "lte", "not", "order", "limit"]) {
         b[op] = (...args: any[]) => { rec.ops.push([op, ...args]); return b; };
       }
       b.maybeSingle = () => { rec.ops.push(["maybeSingle"]); calls.push(rec); return Promise.resolve(result); };
@@ -345,4 +346,37 @@ Deno.test("adminStore.listTxns / annotate のクエリ形", async () => {
   eq((await m.adminStore(a.db).annotate(7, { journal: "j", memo: null }))?.id, 7, "annotate");
   eq(a.calls[0].ops[0][0], "update", "update"); eq(a.calls[0].ops[1], ["eq", "id", 7], "id条件");
   assert(!("amount" in a.calls[0].ops[0][1]), "金額など銀行由来の列は書き換えない");
+});
+
+
+/* ===================== v3: 請求書との紐づけ ===================== */
+Deno.test("annotate: 請求書の紐づけだけ送っても、仕訳・備考は消えない（部分更新）", async () => {
+  const s = memStore(fresh()); const { f } = mockFreee({ total: 3 });
+  await m.runSync(env, s, f, NOW);
+  const h = m.makeHandler(env, s, f);
+  const post = (body: any) => h(new Request("https://x/functions/v1/freee-sync/annotate", { method: "POST", ...H({ "content-type": "application/json" }), body: JSON.stringify(body) }));
+  await post({ id: 1000, journal: "売掛金回収", memo: "9月分" });
+  eq((await post({ id: 1000, invoice_ref: "c1:2026-09" })).status, 200, "紐づけ保存");
+  eq([s.txns.get(1000).journal, s.txns.get(1000).memo, s.txns.get(1000).invoice_ref], ["売掛金回収", "9月分", "c1:2026-09"], "仕訳・備考は保持");
+  await post({ id: 1000, invoice_ref: "" });
+  eq(s.txns.get(1000).invoice_ref, null, "空で紐づけ解除");
+  eq((await post({ id: 1000, invoice_ref: "c1:2026/09" })).status, 400, "形式不正は400");
+  eq((await post({ id: 1000, invoice_ref: "x;drop:2026-09" })).status, 400, "記号混入は400");
+  eq((await post({ id: 1000 })).status, 400, "更新項目なしは400");
+});
+
+Deno.test("links: 紐づけ済みの入金だけを返す・パスワード必須", async () => {
+  const s = memStore(fresh()); const { f } = mockFreee({ total: 4 });
+  await m.runSync(env, s, f, NOW);
+  await s.annotate(1002, { invoice_ref: "c2:2026-08" });
+  const h = m.makeHandler(env, s, f);
+  eq((await h(new Request("https://x/functions/v1/freee-sync/links"))).status, 403, "無認証");
+  const j = await (await h(new Request("https://x/functions/v1/freee-sync/links", H()))).json();
+  eq([j.links.length, j.links[0].invoice_ref], [1, "c2:2026-08"], "1件だけ");
+});
+
+Deno.test("adminStore.listLinked: invoice_ref が null でない行", async () => {
+  const r = fakeDb({ data: [{ id: 1, invoice_ref: "c1:2026-09" }], error: null });
+  await m.adminStore(r.db).listLinked();
+  eq(r.calls[0].ops.find((o: any[]) => o[0] === "not"), ["not", "invoice_ref", "is", null], "not is null");
 });
