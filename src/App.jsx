@@ -2,7 +2,8 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import {
   Home as HomeIcon, ListChecks, Plus, Settings as SettingsIcon, Truck,
   FileText, ChevronLeft, ChevronRight, Trash2, X, Camera, Building2,
-  Receipt, Pencil, Download, Upload, Check, Users, Printer, JapaneseYen, Ruler
+  Receipt, Pencil, Download, Upload, Check, Users, Printer, JapaneseYen, Ruler,
+  Landmark, RefreshCw, Lock
 } from "lucide-react";
 import SEED_RECORDS from "./seed.json";
 
@@ -652,6 +653,9 @@ export default function App() {
           {tab === "invoice" && (
             <InvoiceListView records={records} clients={clients} month={month} setMonth={setMonth} onPreview={(clientId, ym) => setInvoicePrev({ clientId, ym })} />
           )}
+          {tab === "bank" && (
+            <BankView month={month} setMonth={setMonth} showToast={showToast} />
+          )}
           {tab === "settings" && (
             <SettingsView
               company={company} setCompany={setCompanySync}
@@ -669,11 +673,17 @@ export default function App() {
         </main>
 
         <nav className="kl-nav">
-          <NavBtn icon={<HomeIcon size={22} />} label="ホーム" active={tab === "home"} onClick={() => setTab("home")} />
-          <NavBtn icon={<ListChecks size={22} />} label="日報" active={tab === "records"} onClick={() => setTab("records")} />
+          {/* 左右を同じ幅のグループにして、＋ボタンを常に中央に保つ */}
+          <div className="kl-nav-side">
+            <NavBtn icon={<HomeIcon size={22} />} label="ホーム" active={tab === "home"} onClick={() => setTab("home")} />
+            <NavBtn icon={<ListChecks size={22} />} label="日報" active={tab === "records"} onClick={() => setTab("records")} />
+          </div>
           <button className="kl-fab" onClick={openNew} aria-label="記録を追加"><Plus size={28} strokeWidth={2.6} /></button>
-          <NavBtn icon={<Receipt size={22} />} label="請求書" active={tab === "invoice"} onClick={() => setTab("invoice")} />
-          <NavBtn icon={<SettingsIcon size={22} />} label="設定" active={tab === "settings"} onClick={() => setTab("settings")} />
+          <div className="kl-nav-side">
+            <NavBtn icon={<Receipt size={22} />} label="請求書" active={tab === "invoice"} onClick={() => setTab("invoice")} />
+            <NavBtn icon={<Landmark size={22} />} label="口座" active={tab === "bank"} onClick={() => setTab("bank")} />
+            <NavBtn icon={<SettingsIcon size={22} />} label="設定" active={tab === "settings"} onClick={() => setTab("settings")} />
+          </div>
         </nav>
 
         {formOpen && (
@@ -1482,6 +1492,262 @@ function InvoiceDoc({ company, client, ym, records, onClose }) {
 /* ============================================================
    設定
    ============================================================ */
+/* ============================================================
+   口座（freee連携の入出金を全口座表示・仕訳/備考を入力→DB保存）
+   銀行明細は公開キーでは読めない設定。アプリ用パスワード(x-app-key)付きで
+   Edge Function freee-sync の /ledger /annotate /refresh だけを通して読み書きする。
+   ============================================================ */
+const BANK_API = `${SYNC_URL}/functions/v1/freee-sync`;
+const JOURNAL_IN = ["売上高", "売掛金回収", "借入金", "雑収入", "受取利息", "預り金", "資金移動"];
+const JOURNAL_OUT = ["燃料費", "外注費", "給料手当", "役員報酬", "法定福利費", "修繕費", "車両費", "保険料", "租税公課",
+  "地代家賃", "通信費", "水道光熱費", "支払手数料", "消耗品費", "旅費交通費", "接待交際費", "リース料", "借入金返済",
+  "支払利息", "未払金", "雑費", "資金移動"];
+/* 同じ相手先を見分けるキー（数字・空白・記号の揺れを無視） */
+const descKey = (s) => String(s || "").replace(/[\s\d０-９,，.．\-ー－/／:：()（）]/g, "").toLowerCase();
+const monthRange = (ym) => ({ from: `${ym}-01`, to: `${ym}-${String(lastDay(ym)).padStart(2, "0")}` });
+const acctName = (a) => a.walletable_name || (a.walletable_type === "credit_card" ? "クレジットカード" : `口座 ${a.walletable_id ?? ""}`);
+
+async function bankFetch(path, key, init = {}) {
+  const res = await fetch(`${BANK_API}/${path}`, {
+    ...init,
+    headers: { "x-app-key": key, ...(init.body ? { "content-type": "application/json" } : {}) },
+  });
+  const j = await res.json().catch(() => ({}));
+  if (res.status === 403) { const e = new Error("パスワードが違います"); e.code = 403; throw e; }
+  if (!res.ok || j.ok === false) throw new Error(j.error || `HTTP ${res.status}`);
+  return j;
+}
+
+function BankView({ month, setMonth, showToast }) {
+  const [key, setKey] = usePersist("kline4:bankKey", "");
+  const [memory, setMemory] = usePersist("kline4:journalMemory", {}); // 相手先→前回の仕訳（候補表示用）
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [acct, setAcct] = useState("all");
+  const [side, setSide] = useState("all");
+  const [onlyUnset, setOnlyUnset] = useState(false);
+  const [q, setQ] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const reqSeq = useRef(0);
+
+  const load = async () => {
+    if (!key) return;
+    const seq = ++reqSeq.current;
+    setLoading(true);
+    setErr("");
+    const { from, to } = monthRange(month);
+    try {
+      const j = await bankFetch(`ledger?from=${from}&to=${to}`, key);
+      if (seq === reqSeq.current) setData(j);
+    } catch (e) {
+      if (seq !== reqSeq.current) return;
+      if (e.code === 403) { setKey(""); setData(null); setErr("パスワードが違います。もう一度入力してください。"); }
+      else setErr(`読み込みに失敗しました（${e.message}）。電波を確認して、月を切り替えるとやり直せます。`);
+    } finally {
+      if (seq === reqSeq.current) setLoading(false);
+    }
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [key, month]);
+
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      const r = await bankFetch("refresh", key, { method: "POST" });
+      showToast(`freeeから更新しました（${r.fetched}件を確認）✓`);
+      await load();
+    } catch (e) {
+      showToast(`⚠️ 更新に失敗しました（${e.message}）`);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  /* 仕訳・備考の保存（入力欄から離れた時）。画面は先に更新し、失敗したら元に戻す */
+  const save = async (id, journal, memo) => {
+    const prev = data?.txns.find((t) => t.id === id);
+    if (!prev) return;
+    const j = String(journal ?? "").trim();
+    const m = String(memo ?? "").trim();
+    if ((prev.journal || "") === j && (prev.memo || "") === m) return;
+    setData((d) => ({ ...d, txns: d.txns.map((t) => (t.id === id ? { ...t, journal: j || null, memo: m || null, _state: "saving" } : t)) }));
+    try {
+      const r = await bankFetch("annotate", key, { method: "POST", body: JSON.stringify({ id, journal: j, memo: m }) });
+      setData((d) => ({ ...d, txns: d.txns.map((t) => (t.id === id ? { ...t, ...r.txn, _state: "saved" } : t)) }));
+      if (j) setMemory((mm) => ({ ...mm, [descKey(prev.description)]: j }));
+    } catch (e) {
+      setData((d) => ({ ...d, txns: d.txns.map((t) => (t.id === id ? { ...prev, _state: "error" } : t)) }));
+      showToast(`⚠️ 保存できませんでした（${e.message}）`);
+    }
+  };
+
+  const accounts = data?.accounts ?? [];
+  const txns = data?.txns ?? [];
+  const inAcct = (t) => acct === "all" || String(t.walletable_id) === String(acct);
+  const view = useMemo(() => {
+    const qq = q.trim().toLowerCase();
+    return txns.filter((t) =>
+      inAcct(t) &&
+      (side === "all" || t.entry_side === side) &&
+      (!onlyUnset || !t.journal) &&
+      (!qq || `${t.description || ""} ${t.journal || ""} ${t.memo || ""}`.toLowerCase().includes(qq)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [txns, acct, side, onlyUnset, q]);
+  const totals = useMemo(() => view.reduce((a, t) => {
+    if (t.entry_side === "income") a.inc += Number(t.amount) || 0; else a.out += Number(t.amount) || 0;
+    return a;
+  }, { inc: 0, out: 0 }), [view]);
+  const groups = useMemo(() => {
+    const g = new Map();
+    for (const t of view) { if (!g.has(t.txn_date)) g.set(t.txn_date, []); g.get(t.txn_date).push(t); }
+    return [...g.entries()];
+  }, [view]);
+  const unsetCount = txns.filter((t) => inAcct(t) && !t.journal).length;
+  const usedJournals = useMemo(() => [...new Set([...Object.values(memory), ...txns.map((t) => t.journal).filter(Boolean)])], [memory, txns]);
+  const suggestFor = (t) => {
+    const k = descKey(t.description);
+    if (!k) return null;
+    if (memory[k]) return memory[k];
+    return txns.find((x) => x.id !== t.id && x.journal && descKey(x.description) === k)?.journal || null;
+  };
+  const lastSynced = accounts.reduce((mx, a) => (a.last_synced_at && a.last_synced_at > mx ? a.last_synced_at : mx), "");
+  const totalBalance = accounts.reduce((s, a) => s + (Number(a.latest_balance) || 0), 0);
+  const net = totals.inc - totals.out;
+
+  return (
+    <div className="kl-page">
+      <MonthNav month={month} setMonth={setMonth} title="口座" />
+
+      {!key ? (
+        <BankKeySetup err={err} onSet={(k) => { setErr(""); setKey(k); }} />
+      ) : (
+        <>
+          <div className="kl-bank-accts">
+            <button className={"kl-bank-acct" + (acct === "all" ? " is-on" : "")} onClick={() => setAcct("all")}>
+              <span>全口座の残高</span><b>{accounts.length ? yen(totalBalance) : "—"}</b><small>{accounts.length}口座</small>
+            </button>
+            {accounts.map((a) => (
+              <button key={a.walletable_id ?? "x"} className={"kl-bank-acct" + (String(acct) === String(a.walletable_id) ? " is-on" : "")} onClick={() => setAcct(String(a.walletable_id))}>
+                <span>{acctName(a)}</span>
+                <b>{a.latest_balance == null ? "—" : yen(a.latest_balance)}</b>
+                <small>{a.latest_date ? `${fmtDay(a.latest_date)}時点・${a.txn_count}件` : ""}</small>
+              </button>
+            ))}
+          </div>
+
+          <div className="kl-statgrid">
+            <div className="kl-stat"><span>入金（{fmtMonth(month)}）</span><b className="kl-in">{yen(totals.inc)}</b></div>
+            <div className="kl-stat"><span>出金（{fmtMonth(month)}）</span><b className="kl-out">{yen(totals.out)}</b></div>
+            <div className="kl-stat kl-stat-wide" onClick={() => setOnlyUnset((v) => !v)} role="button">
+              <span>差引</span>
+              <b className={net >= 0 ? "kl-in" : "kl-out"}>{net >= 0 ? "+" : "−"}{yen(Math.abs(net))}</b>
+              <small>仕訳が未入力 <b className="kl-unset-count">{unsetCount}件</b>{unsetCount > 0 ? "（タップで絞り込み）" : ""}</small>
+            </div>
+          </div>
+
+          <div className="kl-bank-bar">
+            <span>{lastSynced ? `最終取込 ${new Date(lastSynced).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : "取込情報なし"}・2時間ごとに自動</span>
+            <button onClick={refresh} disabled={refreshing}><RefreshCw size={14} /> {refreshing ? "更新中…" : "今すぐ更新"}</button>
+          </div>
+
+          <div className="kl-bank-filters">
+            {[["all", "すべて"], ["income", "入金"], ["expense", "出金"]].map(([k, l]) => (
+              <button key={k} className={"kl-chip kl-chip-s" + (side === k ? " is-on" : "")} onClick={() => setSide(k)}>{l}</button>
+            ))}
+            <button className={"kl-chip kl-chip-s" + (onlyUnset ? " is-on" : "")} onClick={() => setOnlyUnset((v) => !v)}>仕訳が未入力のみ</button>
+          </div>
+          <input className="kl-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="摘要・仕訳・備考で検索" />
+
+          {err && <div className="kl-empty kl-empty-err">{err}</div>}
+          {loading && !data && <div className="kl-empty">読み込み中…</div>}
+          {data && view.length === 0 && <div className="kl-empty">この条件の入出金はありません。</div>}
+
+          {groups.map(([d, ts]) => {
+            const dayNet = ts.reduce((s, t) => s + (t.entry_side === "income" ? 1 : -1) * (Number(t.amount) || 0), 0);
+            return (
+              <section key={d}>
+                <div className="kl-day">
+                  <span>{fmtDay(d)}</span>
+                  <span className={dayNet >= 0 ? "kl-in" : "kl-out"}>{dayNet >= 0 ? "+" : "−"}{yen(Math.abs(dayNet))}</span>
+                </div>
+                <div className="kl-cards">
+                  {ts.map((t) => <BankTxnRow key={t.id} t={t} suggest={t.journal ? null : suggestFor(t)} onSave={save} />)}
+                </div>
+              </section>
+            );
+          })}
+
+          <datalist id="kl-journal-in">{[...new Set([...JOURNAL_IN, ...usedJournals])].map((v) => <option key={v} value={v} />)}</datalist>
+          <datalist id="kl-journal-out">{[...new Set([...JOURNAL_OUT, ...usedJournals])].map((v) => <option key={v} value={v} />)}</datalist>
+
+          <p className="kl-note" style={{ marginTop: 18 }}>
+            仕訳・備考はクラウドのDB（bank_txns）に保存され、全端末・Supabaseの管理画面からも見られます。freee本体には書き込みません。
+          </p>
+          <button className="kl-linkbtn" onClick={() => { if (window.confirm("この端末から口座のパスワードを削除しますか？\n（再表示にはパスワードの再入力が必要です）")) { setKey(""); setData(null); } }}>
+            <Lock size={16} /> この端末の口座パスワードを削除
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function BankTxnRow({ t, suggest, onSave }) {
+  const [j, setJ] = useState(t.journal || "");
+  const [m, setM] = useState(t.memo || "");
+  useEffect(() => { setJ(t.journal || ""); }, [t.journal]);
+  useEffect(() => { setM(t.memo || ""); }, [t.memo]);
+  const inc = t.entry_side === "income";
+  const enterBlur = (e) => { if (e.key === "Enter") e.currentTarget.blur(); };
+  return (
+    <div className={"kl-btx" + (t.journal ? "" : " is-unset")}>
+      <div className="kl-btx-top">
+        <div className="kl-btx-desc">
+          <b>{t.description || "（摘要なし）"}</b>
+          <span>{acctName(t)}</span>
+        </div>
+        <div className={"kl-btx-amt " + (inc ? "kl-in" : "kl-out")}>
+          {inc ? "+" : "−"}{yen(t.amount)}
+          {t.balance != null && <small>残高 {yen(t.balance)}</small>}
+        </div>
+      </div>
+      <div className="kl-btx-inputs">
+        <input value={j} onChange={(e) => setJ(e.target.value)} onBlur={() => onSave(t.id, j, m)} onKeyDown={enterBlur}
+          list={inc ? "kl-journal-in" : "kl-journal-out"} placeholder="仕訳（勘定科目）" maxLength={60} aria-label="仕訳" />
+        <input value={m} onChange={(e) => setM(e.target.value)} onBlur={() => onSave(t.id, j, m)} onKeyDown={enterBlur}
+          placeholder="備考" maxLength={500} aria-label="備考" />
+      </div>
+      <div className="kl-btx-foot">
+        {!j && suggest && (
+          <button className="kl-btx-suggest" onClick={() => { setJ(suggest); onSave(t.id, suggest, m); }}>候補: {suggest}</button>
+        )}
+        <span className={"kl-btx-state" + (t._state === "error" ? " is-err" : "")}>
+          {t._state === "saving" ? "保存中…" : t._state === "saved" ? "✓ 保存しました" : t._state === "error" ? "⚠️ 保存できませんでした" : ""}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function BankKeySetup({ onSet, err }) {
+  const [v, setV] = useState("");
+  return (
+    <div className="kl-setcard" style={{ marginTop: 14 }}>
+      <div className="kl-setcard-head"><Lock size={17} /><h2>口座データの表示パスワード</h2></div>
+      <p className="kl-note" style={{ marginTop: 0 }}>
+        銀行の入出金は大切な情報のため、パスワードを入れた端末だけで表示します。1回入れれば、この端末に記憶されます。
+      </p>
+      <label className="kl-field">
+        <input type="password" value={v} onChange={(e) => setV(e.target.value)} placeholder="16桁のパスワード" autoComplete="off"
+          onKeyDown={(e) => { if (e.key === "Enter" && v.trim()) onSet(v.trim()); }} />
+      </label>
+      {err && <p className="kl-note kl-empty-err" style={{ marginTop: -4 }}>{err}</p>}
+      <button className="kl-bigadd" onClick={() => v.trim() && onSet(v.trim())}><Landmark size={20} /> 口座を表示する</button>
+    </div>
+  );
+}
+
 function SettingsView({ company, setCompany, clients, setClients, employees, setEmployees, vehicles, setVehicles, units, setUnits, records, setRecords, pin, setPin, setMode, syncState, lastSyncAt, pendingCount, onSyncNow, showToast }) {
   const setC = (k) => (e) => setCompany({ ...company, [k]: e.target.value });
   const importRef = useRef(null);
@@ -1958,6 +2224,42 @@ button{ font-family:inherit; }
 .kl-navbtn.is-active{ color:var(--accent); }
 .kl-fab{ width:58px; height:58px; border-radius:50%; background:var(--accent); color:#fff; border:none; display:grid; place-items:center; cursor:pointer; margin-top:-26px; box-shadow:0 6px 16px rgba(176,58,42,.4); flex:0 0 auto; }
 .kl-fab:active{ transform:scale(.94); }
+.kl-nav-side{ flex:1; display:flex; align-items:center; }
+
+/* 口座（freee連携） */
+.kl-in{ color:var(--green); }
+.kl-out{ color:var(--accent); }
+.kl-bank-accts{ display:flex; gap:10px; overflow-x:auto; padding:2px 2px 12px; margin:0 -2px; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
+.kl-bank-accts::-webkit-scrollbar{ display:none; }
+.kl-bank-acct{ flex:0 0 auto; min-width:150px; max-width:210px; text-align:left; background:var(--card); border:1.5px solid var(--line); border-radius:14px; padding:11px 13px; box-shadow:var(--shadow); cursor:pointer; font-family:inherit; color:var(--ink); }
+.kl-bank-acct.is-on{ border-color:var(--accent); background:var(--accent-soft); }
+.kl-bank-acct span{ display:block; font-size:11.5px; color:var(--ink2); font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.kl-bank-acct b{ display:block; font-size:18px; font-weight:800; font-variant-numeric:tabular-nums; margin-top:2px; }
+.kl-bank-acct small{ font-size:11px; color:var(--muted); font-weight:700; }
+.kl-unset-count{ display:inline !important; font-size:inherit !important; color:#B7791F; }
+.kl-bank-bar{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin:14px 0 2px; font-size:12px; color:var(--muted); font-weight:700; }
+.kl-bank-bar button{ flex:0 0 auto; min-height:36px; padding:0 12px; border:1.5px solid var(--line); background:var(--card); border-radius:999px; font-size:12.5px; font-weight:800; color:var(--ink); display:inline-flex; align-items:center; gap:5px; cursor:pointer; font-family:inherit; }
+.kl-bank-bar button:disabled{ opacity:.55; }
+.kl-bank-filters{ display:flex; gap:6px; flex-wrap:wrap; margin:10px 0 8px; }
+.kl-search{ width:100%; min-height:44px; border:1.5px solid var(--line); border-radius:11px; padding:0 12px; font-size:16px; background:var(--card); color:var(--ink); font-family:inherit; margin-bottom:4px; }
+.kl-search:focus{ outline:none; border-color:var(--accent); }
+.kl-empty-err{ color:var(--accent) !important; border-color:var(--accent) !important; }
+.kl-day{ display:flex; justify-content:space-between; font-size:12.5px; font-weight:800; color:var(--ink2); margin:18px 2px 7px; font-variant-numeric:tabular-nums; }
+.kl-btx{ background:var(--card); border:1px solid var(--line); border-radius:13px; padding:11px 12px 9px; box-shadow:var(--shadow); }
+.kl-btx.is-unset{ border-left:4px solid #E3A008; }
+.kl-btx-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+.kl-btx-desc{ min-width:0; }
+.kl-btx-desc b{ display:block; font-size:14px; font-weight:800; overflow-wrap:anywhere; line-height:1.4; }
+.kl-btx-desc span{ font-size:11.5px; color:var(--muted); font-weight:700; }
+.kl-btx-amt{ text-align:right; font-size:16px; font-weight:800; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.kl-btx-amt small{ display:block; font-size:11px; color:var(--muted); font-weight:700; margin-top:1px; }
+.kl-btx-inputs{ display:grid; grid-template-columns:2fr 3fr; gap:8px; margin-top:9px; }
+.kl-btx-inputs input{ width:100%; min-width:0; min-height:40px; border:1.5px solid var(--line); border-radius:10px; padding:0 10px; font-size:16px; background:var(--bg); color:var(--ink); font-family:inherit; }
+.kl-btx-inputs input:focus{ outline:none; border-color:var(--accent); background:#fff; }
+.kl-btx-foot{ display:flex; align-items:center; gap:8px; margin-top:6px; font-size:11.5px; color:var(--muted); font-weight:700; min-height:18px; flex-wrap:wrap; }
+.kl-btx-suggest{ border:1px dashed var(--accent); background:var(--accent-soft); color:var(--accent); border-radius:999px; padding:4px 10px; font-size:12px; font-weight:800; cursor:pointer; font-family:inherit; }
+.kl-btx-state{ color:var(--green); }
+.kl-btx-state.is-err{ color:var(--accent); }
 
 /* link button */
 .kl-linkbtn{ width:100%; margin-top:22px; min-height:50px; border:1.5px solid var(--line); background:var(--card); border-radius:13px; font-size:15px; font-weight:800; color:var(--ink); display:flex; align-items:center; justify-content:center; gap:7px; cursor:pointer; box-shadow:var(--shadow); }
@@ -1980,7 +2282,7 @@ button{ font-family:inherit; }
 
 .kl-field{ display:block; margin-bottom:14px; }
 .kl-label{ display:block; font-size:12px; font-weight:800; color:var(--ink2); margin-bottom:6px; }
-.kl-field input[type=text], .kl-field input[type=date], .kl-field input:not([type]){
+.kl-field input[type=text], .kl-field input[type=date], .kl-field input[type=password], .kl-field input:not([type]){
   width:100%; min-height:48px; border:1.5px solid var(--line); border-radius:12px; background:var(--card);
   padding:10px 14px; font-size:16px; font-weight:600; color:var(--ink); outline:none; }
 .kl-field input:focus{ border-color:var(--accent); }

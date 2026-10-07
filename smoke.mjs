@@ -1,6 +1,18 @@
 import { JSDOM } from "jsdom";
 import { readFileSync, readdirSync } from "fs";
 
+/* テスト内の「今日」を 2026-07-14 に固定する（6月実績データ前提の検証が、実行日によって壊れないように）。
+   経過時間は実時間で進めるので setTimeout 等はそのまま動く */
+{
+  const FIXED = Date.parse("2026-07-14T03:00:00Z");
+  const RealDate = Date;
+  const START = RealDate.now();
+  globalThis.Date = class extends RealDate {
+    constructor(...a) { if (a.length === 0) super(FIXED + (RealDate.now() - START)); else super(...a); }
+    static now() { return FIXED + (RealDate.now() - START); }
+  };
+}
+
 const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
   url: "https://example.com/kline-app/",
   runScripts: "outside-only",
@@ -306,6 +318,93 @@ if (tollCard) {
 
 // モーダルを閉じた後にbodyスクロールが開閉前の状態に戻っていること（v3.15スクロール修正）
 console.log("--- body overflow復元?:", w.document.body.style.overflow === preOverflowBody && w.document.documentElement.style.overflow === preOverflowHtml);
+
+// --- v3.19: 口座タブ（freee連携の入出金・仕訳/備考） ---
+{
+  const sv = Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, "value").set;
+  const bankCalls = [];
+  const ledger = {
+    ok: true, from: "2026-10-01", to: "2026-10-31",
+    accounts: [{ walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", walletable_type: "bank_account", latest_balance: 3456789, latest_date: "2026-10-07", txn_count: 201, last_synced_at: "2026-10-07T11:05:00Z" }],
+    txns: [
+      { id: 901, txn_date: "2026-10-07", amount: 1122000, entry_side: "income", walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", description: "ﾌﾘｺﾐ ｵｸﾉﾅﾏｺﾝ", balance: 3456789, journal: null, memo: null },
+      { id: 902, txn_date: "2026-10-06", amount: 33000, entry_side: "expense", walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", description: "ENEOS 高槻 1006", balance: 2334789, journal: null, memo: null },
+      { id: 903, txn_date: "2026-10-03", amount: 21000, entry_side: "expense", walletable_id: 5, walletable_name: "GMOあおぞらネット銀行", description: "ENEOS 高槻 1003", balance: 2367789, journal: null, memo: null },
+    ],
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes("/functions/v1/freee-sync/")) {
+      bankCalls.push({ u, init });
+      const key = init.headers?.["x-app-key"];
+      if (key !== "goodkey1234abcd0") return new Response(JSON.stringify({ ok: false, error: "forbidden" }), { status: 403 });
+      if (u.includes("/ledger")) return new Response(JSON.stringify(ledger), { status: 200 });
+      if (u.includes("/annotate")) { const b = JSON.parse(init.body); return new Response(JSON.stringify({ ok: true, txn: { id: b.id, journal: b.journal || null, memo: b.memo || null, annotated_at: "x" } }), { status: 200 }); }
+      if (u.includes("/refresh")) return new Response(JSON.stringify({ ok: true, fetched: 98 }), { status: 200 });
+    }
+    return new Response("[]", { status: 200 }); // 日報同期など他の通信は空で返す
+  };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  [...w.document.querySelectorAll(".kl-navbtn")].find((b) => b.textContent.includes("口座")).dispatchEvent(new w.Event("click", { bubbles: true }));
+  await wait(300);
+  console.log("--- 口座タブ: ナビに口座ボタン・パスワード入力画面?:", w.document.body.textContent.includes("口座データの表示パスワード"));
+  const fab = w.document.querySelector(".kl-fab"); const sides = w.document.querySelectorAll(".kl-nav-side");
+  console.log("--- ナビ: 左右グループ2つで＋ボタンが中央?:", sides.length === 2 && fab.previousElementSibling === sides[0] && fab.nextElementSibling === sides[1]);
+
+  // 間違ったパスワード→エラー表示・記憶しない
+  let pw = w.document.querySelector('.kl-setcard input[type="password"]');
+  sv.call(pw, "wrongwrongwrong1"); pw.dispatchEvent(new w.Event("input", { bubbles: true }));
+  [...w.document.querySelectorAll("button")].find((b) => b.textContent.includes("口座を表示する")).dispatchEvent(new w.Event("click", { bubbles: true }));
+  await wait(300);
+  console.log("--- 誤パスワード: エラー表示＆端末に記憶しない?:", w.document.body.textContent.includes("パスワードが違います") && !JSON.parse(w.localStorage.getItem("kline4:bankKey") || '""'));
+
+  // 正しいパスワード
+  pw = w.document.querySelector('.kl-setcard input[type="password"]');
+  sv.call(pw, "goodkey1234abcd0"); pw.dispatchEvent(new w.Event("input", { bubbles: true }));
+  [...w.document.querySelectorAll("button")].find((b) => b.textContent.includes("口座を表示する")).dispatchEvent(new w.Event("click", { bubbles: true }));
+  await wait(400);
+  const tx = w.document.body.textContent;
+  console.log("--- 正パスワード: 端末に記憶?:", JSON.parse(w.localStorage.getItem("kline4:bankKey")) === "goodkey1234abcd0");
+  console.log("--- 口座カード(銀行名・残高¥3,456,789)?:", tx.includes("GMOあおぞらネット銀行") && tx.includes("3,456,789"));
+  console.log("--- 明細3件表示・入金+¥1,122,000/出金−¥33,000?:", w.document.querySelectorAll(".kl-btx").length === 3 && tx.includes("+¥1,122,000") && tx.includes("−¥33,000"));
+  console.log("--- 入金合計¥1,122,000・出金合計¥54,000・未入力3件?:", tx.includes("1,122,000") && tx.includes("54,000") && tx.includes("3件"));
+  const ledgerCall = bankCalls.find((c) => c.u.includes("/ledger") && c.init.headers["x-app-key"] === "goodkey1234abcd0");
+  console.log("--- ledgerは月初〜月末で要求?:", !!ledgerCall && /from=\d{4}-\d{2}-01&to=\d{4}-\d{2}-(28|29|30|31)/.test(ledgerCall.u));
+
+  // ENEOS(1006)に仕訳「燃料費」＋備考を入力→離脱で保存
+  const row = [...w.document.querySelectorAll(".kl-btx")].find((r) => r.textContent.includes("ENEOS 高槻 1006"));
+  const [jIn, mIn] = row.querySelectorAll("input");
+  console.log("--- 出金行の仕訳候補リストは出金用?:", jIn.getAttribute("list") === "kl-journal-out" && !!w.document.querySelector('#kl-journal-out option[value="燃料費"]'));
+  sv.call(jIn, "燃料費"); jIn.dispatchEvent(new w.Event("input", { bubbles: true }));
+  sv.call(mIn, "ダンプ9003 給油"); mIn.dispatchEvent(new w.Event("input", { bubbles: true }));
+  mIn.dispatchEvent(new w.FocusEvent("focusout", { bubbles: true }));
+  await wait(300);
+  const ann = bankCalls.filter((c) => c.u.includes("/annotate"));
+  const body = ann.length ? JSON.parse(ann[ann.length - 1].init.body) : {};
+  console.log("--- 保存: POST /annotate {id:902, 燃料費, 備考}?:", ann.length >= 1 && ann[ann.length - 1].init.method === "POST" && body.id === 902 && body.journal === "燃料費" && body.memo === "ダンプ9003 給油");
+  console.log("--- 保存後に✓表示・未入力が2件に減る?:", w.document.body.textContent.includes("✓ 保存しました") && w.document.body.textContent.includes("2件"));
+  // 同じ相手先(ENEOS 高槻 1003)に「候補: 燃料費」が出る（数字違いは同一視）
+  const row3 = [...w.document.querySelectorAll(".kl-btx")].find((r) => r.textContent.includes("ENEOS 高槻 1003"));
+  console.log("--- 同じ相手先に『候補: 燃料費』?:", !!row3 && row3.textContent.includes("候補: 燃料費"));
+  // 値が変わっていなければ再送しない
+  const before = bankCalls.filter((c) => c.u.includes("/annotate")).length;
+  jIn.dispatchEvent(new w.FocusEvent("focusout", { bubbles: true }));
+  await wait(200);
+  console.log("--- 変更なしの離脱では再送しない?:", bankCalls.filter((c) => c.u.includes("/annotate")).length === before);
+  // 絞り込み: 未入力のみ
+  [...w.document.querySelectorAll(".kl-chip")].find((b) => b.textContent.includes("仕訳が未入力のみ")).dispatchEvent(new w.Event("click", { bubbles: true }));
+  await wait(150);
+  console.log("--- 未入力のみ絞り込みで2件?:", w.document.querySelectorAll(".kl-btx").length === 2);
+  // 今すぐ更新
+  [...w.document.querySelectorAll("button")].find((b) => b.textContent.includes("今すぐ更新")).dispatchEvent(new w.Event("click", { bubbles: true }));
+  await wait(400);
+  console.log("--- 今すぐ更新: POST /refresh→トースト?:", bankCalls.some((c) => c.u.includes("/refresh") && c.init.method === "POST") && w.document.body.textContent.includes("freeeから更新しました"));
+  globalThis.fetch = origFetch;
+  // 後続テストのためホームへ戻す
+  [...w.document.querySelectorAll(".kl-navbtn")].find((b) => b.textContent.includes("ホーム")).dispatchEvent(new w.Event("click", { bubbles: true }));
+  await wait(200);
+}
 
 // 従業員モードテスト: モードリセット→従業員選択
 w.localStorage.removeItem("kline4:mode");
